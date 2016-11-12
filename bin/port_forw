@@ -1,0 +1,85 @@
+#!/usr/bin/perl -w
+
+use strict;
+use warnings;
+
+use IO::Socket::INET;
+
+our $src_port;
+our $dst_port;
+
+sub server($)
+{
+	my $src = shift;
+	my $dst;
+
+	my $src_closed = 0;
+	my $dst_closed = 0;
+	
+	print(STDERR "failed to connect: $!\n"), return 1 if (!defined ($dst = IO::Socket::INET->new(Proto => 'tcp', PeerAddr => "localhost", PeerPort => $dst_port)));
+
+	while (!$src_closed || $dst_closed) {
+		my ($rbits);
+		$rbits = "";
+		vec($rbits, fileno($src), 1) = 1 if (!$src_closed);
+		vec($rbits, fileno($dst), 1) = 1 if (!$dst_closed);
+
+		return 1 if (select($rbits, undef, undef, undef) < 0);
+		if (!$src_closed && vec($rbits, fileno($src), 1)) {
+			my $e;
+			my $r;
+			return 1 if (!defined ($e = sysread($src, $r, 8192)));
+			if ($e == 0) {
+				$src_closed = 1;
+				shutdown($dst, 1);
+			}
+			else {
+				print("->: $r\n");
+				while ($r ne "") {
+					shutdown($src, 0), $src_closed = 1, last if (!defined ($e = syswrite($dst, $r)));
+					substr($r, 0, $e) = "";
+				}
+			}
+		}
+		if (!$dst_closed && vec($rbits, fileno($dst), 1)) {
+			my $e;
+			my $r;
+			return 1 if (!defined ($e = sysread($dst, $r, 8192)));
+			if ($e == 0) {
+				$src_closed = 1;
+				shutdown($src, 1);
+			}
+			else {
+				print("<-: $r\n");
+				while ($r ne "") {
+					shutdown($dst, 0), $dst_closed = 1, last if (!defined ($e = syswrite($src, $r)));
+					substr($r, 0, $e) = "";
+				}
+			}
+		}
+	}
+	return 0;
+}
+
+die "Usage: $0 source-port dest-port\n" if ($#ARGV != 1);
+
+$src_port = $ARGV[0];
+$dst_port = $ARGV[1];
+
+my $lsock = IO::Socket::INET->new(Listen => 127, Proto => 'tcp', LocalPort => $src_port, ReuseAddr => 1);
+
+for (;;) {
+	my $nc;
+	my $cpid;
+
+	next if (!accept($nc, $lsock));
+	if (!defined ($cpid = fork())) {
+		print(STDERR "failed to fork: $!\n");
+	}
+	elsif ($cpid != 0) {
+		exit(server($nc));
+	}
+	else {
+		exit(0);
+	}
+}

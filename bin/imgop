@@ -1,0 +1,265 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+use Data::Dumper;
+use FileHandle;
+use DirHandle;
+use List::Util;
+
+sub readFiles($$)
+{
+	my $dname		= shift;
+	my $pref		= shift;
+
+	my $dh = DirHandle->new($dname eq "" ? "." : $dname)
+		or die "failed to open $dname: $!";
+	my @flist = sort({ $a->{num} <=> $b->{num} }
+		map({
+				if (m/(.*?)(\d+)\.([^.]*)/) {
+					if ($1 eq $pref) {
+						{ name => $_, pref => $1, num => $2, suff => $3 };
+					}
+					else {
+						();
+					}
+				}
+				else {
+					();
+				}
+			}
+			$dh->read())
+	);
+	my %allfiles;
+	foreach my $fd (@flist) {
+		$allfiles{$fd->{num}} = { num => $fd->{num}, list => [] } unless (exists $allfiles{$fd->{num}});
+		push(@{$allfiles{$fd->{num}}->{list}}, $fd);
+	}
+	#print(Dumper(\%allfiles));
+	return %allfiles;
+}
+
+sub doMove($%%)	# $dirname \%myfiles \%allfiles
+{
+	my $dirname		= shift;
+	my $myfiles		= shift;
+	my $allfiles		= shift;
+
+	foreach my $grp (values %$myfiles) {
+		die "newn was not set for original $grp->{num}" unless (defined $grp->{newn});
+		die "operation would overwrite index $grp->{newn}" if ((exists $allfiles->{$grp->{newn}}) && !(exists $myfiles->{$grp->{newn}}));
+		foreach (@{$grp->{list}}) {
+			die "file ${dirname}iop-$_->{name} exists" if (-e "${dirname}iop-$_->{name}");
+		}
+	}
+	foreach my $grp (values %$myfiles) {
+		foreach my $fd (@{$grp->{list}}) {
+			rename("${dirname}$fd->{name}", "${dirname}iop-$fd->{name}")
+				or die "failed to rename ${dirname}$fd->{name} to ${dirname}iop-$fd->{name}";
+		}
+	}
+	foreach my $grp (values %$myfiles) {
+		foreach my $fd (@{$grp->{list}}) {
+			my $old = "${dirname}iop-$fd->{name}";
+			my $new = sprintf("%s%s%0*d.%s", $dirname, $fd->{pref}, length($grp->{num}), $grp->{newn}, $fd->{suff});
+			die "file $new already exists" if (-e $new);
+			rename($old, $new)
+				or die "failed to rename ${dirname}$fd->{name} to ${dirname}iop-$fd->{name}";
+			#printf("renamed %s to %s\n", $old, $new);
+		}
+	}
+}
+
+sub performPack($$$$$)
+{
+	my $dname		= shift;
+	my $pref		= shift;
+	my $start		= shift;
+	my $end			= shift;
+	my $reqbase		= shift;
+
+	my %allfiles = readFiles($dname, $pref);
+	my %myfiles;
+	foreach my $n (grep({ $_ >= $start && $_ <= $end } keys %allfiles)) {
+		$myfiles{$n} = $allfiles{$n};
+	}
+	$start = List::Util::min(keys %myfiles);
+	$end = List::Util::max(keys %myfiles);
+
+	foreach my $i (sort({ $a <=> $b } keys %myfiles)) {
+		$myfiles{$i}->{newn} = $reqbase++;
+	}
+	doMove($dname, \%myfiles, \%allfiles);
+}
+
+sub performRot($$$$$)
+{
+	my $dname		= shift;
+	my $pref		= shift;
+	my $start		= shift;
+	my $end			= shift;
+	my $reqdest		= shift;
+
+	my %allfiles = readFiles($dname, $pref);
+	my %origfiles;
+	my $origcnt = 0;
+	my %myfiles;
+
+	foreach my $grp (values %allfiles) {
+		if ($grp->{num} >= $start && $grp->{num} <= $end) {
+			$origfiles{$grp->{num}} = $grp;
+			$origcnt++;
+		}
+	}
+	if ($reqdest <= $start) {
+		my @nums = ();
+		foreach my $grp (values %allfiles) {
+			if ($grp->{num} >= $reqdest && $grp->{num} <= $end) {
+				$myfiles{$grp->{num}} = $grp;
+				push(@nums, $grp->{num});
+			}
+		}
+		@nums = sort({ $a <=> $b } @nums);
+		foreach my $grp (sort({$ a->{num} <=> $b->{num} } values %origfiles)) {
+			$grp->{newn} = shift(@nums);
+		}
+		foreach my $grp (sort({ $a->{num} <=> $b->{num} } grep({ !exists $_->{newn} } values %myfiles))) {
+			$grp->{newn} = shift(@nums);
+		}
+	}
+	elsif ($reqdest > $end) {
+		my @nums = ();
+		foreach my $grp (values %allfiles) {
+			if ($grp->{num} >= $start && $grp->{num} < $reqdest) {
+				$myfiles{$grp->{num}} = $grp;
+				push(@nums, $grp->{num});
+			}
+		}
+		@nums = sort({ $a <=> $b } @nums);
+		foreach my $grp (sort({ $b->{num} <=> $a->{num} } values %origfiles)) {
+			$grp->{newn} = pop(@nums);
+		}
+		foreach my $grp (sort({ $a->{num} <=> $b->{num} } grep({ !exists $_->{newn} } values %myfiles))) {
+			$grp->{newn} = shift(@nums);
+		}
+	}
+	else {
+		die "not implemented yet";
+	}
+	doMove($dname, \%myfiles, \%allfiles);
+}
+
+sub performDsort($)
+{
+	my $dname		= shift;
+
+	my $tname = "$dname/iop$$";
+
+	my $dh = DirHandle->new($dname eq "" ? "." : $dname)
+		or die "failed to open $dname: $!";
+	my @flist = sort({
+			if ($a =~ /^.*?(\d+)\.[^.]*$/) {
+				my $da = $1;
+				if ($b =~ /^.*?(\d+)\.[^.]*$/) {
+					my $db = $1;
+					$da <=> $db;
+				}
+				else {
+					0;
+				}
+			}
+			else {
+				0;
+			}
+		}
+		grep({ $_ ne "." && $_ ne ".." } 
+			$dh->read()));
+	mkdir($tname)
+		or die "failed to create $tname: $!";
+	foreach my $fname (@flist) {
+		rename("$dname/$fname", "$tname/$fname")
+			or die "failed to rename $dname/$fname to $tname/$fname: $!";
+	}
+	foreach my $fname (@flist) {
+		rename("$tname/$fname", "$dname/$fname")
+			or die "failed to rename $tname/$fname to $dname/$fname: $!";
+	}
+	rmdir($tname)
+		or die "failed to remove temporary directory $tname: $!";
+}
+
+sub performXchg($$)
+{
+	my $sname		= shift;
+	my $dname		= shift;
+
+	if (!-f $sname || !-f $dname) {
+		die "one of the files does not exist";
+	}
+	if (-e "$sname-iop") {
+		die "temporary file $sname-iop exists";
+	}
+	rename($sname, "$sname-iop")
+		or die "failed to rename $sname to $sname-iop: $!";
+	rename($dname, $sname)
+		or die "failed to rename $dname to $sname: $!";
+	rename("$sname-iop", $dname)
+		or die "failed to rename $sname-iop to $dname: $!";
+}
+
+die "usage: $0 operation operation-args" unless (@ARGV >= 1);
+my $op = shift @ARGV;
+
+if ($op eq "pack") {
+	die "Usage: $0 first-file[:end-file] required-base" unless (@ARGV >= 2);
+	my $oname = shift @ARGV;
+	my $reqbase = shift @ARGV;
+	if ($oname !~ m#^(|.*/)([^/:]*?)(\d+)\.(\w+)(:([^/:]*?)(\d+)\.(\w+))?$#) {
+		die "operation pack requires two arguments: start-file[:end-file] required-base";
+	}
+	my $dname = $1;
+	my $pref = $2;
+	my $start = $3;
+	my $end;
+	if (defined $5) {
+		$end = $7;
+	}
+	else {
+		$end = 99999999;
+	}
+	performPack($dname, $pref, $start, $end, $reqbase);
+}
+elsif ($op eq "dsort") {
+	die "Usage: $0 dsort dirname" unless (@ARGV == 1);
+	my $dname = shift @ARGV;
+	performDsort($dname);
+}
+elsif ($op eq "rot") {
+	die "Usage: $0 first-file[:end-file] destination-index" unless (@ARGV >= 2);
+	my $oname = shift @ARGV;
+	my $reqdest = shift @ARGV;
+	if ($oname !~ m#^(|.*/)([^/:]*?)(\d+)\.(\w+)(:([^/:]*?)(\d+)\.(\w+))?$#) {
+		die "operation rot requires two arguments: start-file[:end-file] required-base";
+	}
+	my $dname = $1;
+	my $pref = $2;
+	my $start = $3;
+	my $end;
+	if (defined $5) {
+		$end = $7;
+	}
+	else {
+		$end = $start;
+	}
+	performRot($dname, $pref, $start, $end, $reqdest);
+}
+elsif ($op eq "xchg") {
+	die "Usage: $0 first-file second-file" unless (@ARGV == 2);
+	my $sname = shift @ARGV;
+	my $dname = shift @ARGV;
+	performXchg($sname, $dname);
+}
+else {
+	die "unknown operation: $op";
+}

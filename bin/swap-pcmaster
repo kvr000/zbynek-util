@@ -1,0 +1,23 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+
+# instead of using CSV parser, keep all the formatting and wrapping so that the next in the chain can still guess numbers and strings
+
+
+my $header = <>;
+my @out;
+
+while (<>) {
+	if ($_ =~ m,^(\d\d)/(\d\d)/(\d\d\d\d)\t(\d\d)/(\d\d)/(\d\d\d\d)\t(\$(\S+)|\(\$(\S+)\))(\t.*)$,s) {
+		my $price = (defined $8 && $8 ne "") ? $8 : "-$9";
+		unshift(@out, "$2/$1/$3\t$5/$4/$6\t$price$10");
+	}
+	else {
+		STDERR->print("Didn't match: $_");
+		unshift(@out, $_);
+	}
+}
+
+print($header, @out);

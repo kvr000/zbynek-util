@@ -1,0 +1,519 @@
+#!/usr/bin/perl -w
+#
+# by Zbynek Vyskovsky (kvr@centrum.cz, http://kvr.matfyz.cz)
+# licence (if needed ;) ) is GPL
+# usage is simple $0 config-file (see --- config read --- in this file)
+
+use strict;
+use warnings;
+
+use POSIX;
+use POSIX ":sys_wait_h";
+use Fcntl;
+use Fcntl ':flock';
+use FileHandle;
+use IO::Handle;
+use Data::Dumper;
+use Socket;
+use Mail::POP3Client;
+use IPC::Open2;
+
+our %child = ();
+our $c_deliverprog = "maildrop";
+our $c_pgpassph;
+
+sub erlog($)
+{
+	print(STDERR strftime("%Y-%m-%d %H:%M:%S %z ", localtime()).shift()."\n");
+}
+
+sub deliver_mail($$) # mail add-to-header
+{
+	my $bad;
+	my $m = shift;
+
+	$m =~ s/\n\r?\n/\n$_\n/s if (defined ($_ = shift));
+	return "failed to open pipe for $c_deliverprog\n" if (!open(DF, "|$c_deliverprog"));
+	print(DF $m);
+	close(DF);
+	return "$c_deliverprog exited with code $?\n" if ($? != 0);
+	return "";
+}
+
+our $async_pending_free = 0;
+our %async_pending_pids = ();
+our %async_pending_results = ();
+
+sub async_reset()
+{
+	%async_pending_results = ();
+	$async_pending_free = 24;
+}
+
+sub async_wait_store()
+{
+	if (defined (my $pid = waitpid(-1, 0))) {
+		my $c = $async_pending_pids{$pid};
+		delete $async_pending_pids{$pid};
+		$async_pending_results{$c} = $?;
+		$async_pending_free++;
+	}
+}
+
+sub async_deliver_mail($$)
+{
+	my $bad;
+	my $m = shift;
+
+	my $fd;
+	my $pid;
+
+	$m =~ s/\n\r?\n/\n$_\n/s if (defined ($_ = shift));
+
+	if ($async_pending_free <= 0) {
+		async_wait_store();
+	}
+	$async_pending_free--;
+	pipe(my $fi, my $fo);
+	if (!defined ($pid = fork())) {
+		return { err => "failed to fork: $!" };
+	}
+	elsif ($pid == 0) {
+		close($fo);
+		open(STDIN, "<&", $fi);
+		exec($c_deliverprog);
+		die "failed to run $c_deliverprog: $!";
+	}
+	close($fi);
+	$fo->print($m);
+	close($fo);
+	my $c = $async_pending_pids{$pid} = { pid => $pid };
+	$async_pending_results{$c} = undef;
+	return $c;
+}
+
+sub async_wait_mail($)
+{
+	my $c = shift;
+
+	return $c->{err} if (defined $c->{err});
+	my $code;
+	if (!exists $async_pending_results{$c}) {
+		print($c);
+		print(Dumper(\%async_pending_results));
+		die "something wrong\n";
+	}
+	while (!defined ($code = $async_pending_results{$c})) {
+		async_wait_store();
+	}
+	delete $async_pending_results{$c};
+	return $code == 0 ? "" : "failed to process maildrop: $?: $!";
+}
+
+sub disk_sync()
+{
+	system("sync");
+}
+
+sub runchild_readasock()
+{
+	while (<RS>) {
+		last if (!m/^.*\n$/s);
+		print(WAF $_); WAF->flush();
+	}
+}
+
+sub runchild_mbox($)
+{
+	my $d = shift;
+	my $m;
+	my $h;
+	my $bad = "";
+	my $lp = 0;
+	my $c;
+	my $cnt;
+
+	$SIG{ALRM} = sub { 
+		erlog("suspending because of alarm, probably looping!");
+		raise("STOP");
+		alarm(60);
+	};
+	alarm(900);
+
+	erlog("failed to open $d->{SRV}: $!"), return 0x11 if (!open(F, "+<$d->{SRV}"));
+	erlog("failed to lock $d->{SRV}: $!"), return 0x12 if (!flock(F, LOCK_EX));
+
+	alarm(0);
+	for ($cnt = 0;;) {
+		my $sp;
+		my $m;
+		my $lbl = 0;
+		last if (!defined ($m = <F>));
+		while (<F>) {
+			last if ($lbl && /^From .*\d{4}/);
+			$lbl = (m/^$/)?1:0;
+			$m .= $_;
+			$sp = tell(F);
+		}
+		seek(F, $sp, 0);
+		last if (($bad = deliver_mail($m, $d->{ADDH})) ne "");
+		$cnt++;
+		$lp = $sp;
+	}
+
+	alarm(60);
+	disk_sync() if ($cnt > 0);
+	while ((my $c = read(F, $m, 16384)) != 0) {
+		erlog("something really bad happened with mailbox, exiting"), return 0x10 if (!defined $c);
+		seek(F, -$c-$lp, 1);
+		print(F $m);
+		seek(F, +$lp, 1);
+	}
+	truncate(F, tell(F)-$lp) if ($bad eq "");
+
+	flock(F, LOCK_UN);
+	close(F);
+
+	return ($bad ne "")?0x19:0;
+}
+
+sub runchild_pop3($)
+{
+	my $d = shift;
+	my $c;
+	my $i;
+	my $bad = "";
+	my $n;
+	my $am = 'BEST'; $am = $d->{P3AM} if (defined $d->{P3AM});
+	my $cnt;
+	my @pending;
+
+	$SIG{ALRM} = sub { 
+		erlog("exiting because of alarm!");
+		exit(0);
+	};
+	$SIG{PIPE} = 'IGNORE';
+AGAIN:
+	async_reset();
+
+	@pending = ();
+	my $again = 0;
+	alarm(300);
+	$c = new Mail::POP3Client(USER => $d->{USER}, PASSWORD => $d->{PASS}, HOST => $d->{SRV}, PORT => $d->{PORT}, AUTH_MODE => $am) or die "connection to $c->{SRV}:$c->{PORT} failed\n";
+
+	if (($n = $c->Count()) < 0) {
+		erlog("$d->{ID}: connect failed");
+		return 0x12;
+	}
+	$again = 1, $n = 510 if ($n > 510);
+	for ($cnt = 0, $i = 1; $i <= $n; $i++) {
+		my $m;
+		alarm(300);
+		last if (!defined ($m = $c->HeadAndBody($i)));
+		$m =~ s/\r//g;
+		alarm(0);
+		push(@pending, async_deliver_mail($m, $d->{ADDH}));
+		alarm(300);
+		$c->Delete($i);
+		$cnt++;
+	}
+	alarm(300);
+	foreach (@pending) {
+		$bad = async_wait_mail($_) || $bad;
+	}
+	disk_sync() if (@pending);
+	alarm(60);
+	$c->Reset() if ($bad);
+	$c->Close();
+	$again = 0, erlog("$d->{ID}: $bad") if ($bad ne "");
+	goto AGAIN if ($again);
+	return ($bad ne "")?0x19:0;
+}
+
+sub terminate_func
+{
+	erlog("terminating, maybe on signal");
+	foreach (keys %child) {
+		kill(15, $_);
+	}
+	exit(0);
+}
+
+sub kill_self
+{
+	erlog("something important exited, exiting too ;)");
+	terminate_func();
+}
+
+# --- config ---
+
+# port for incoming download requests
+my $aport = 0;
+my $stunnel_ver = 4;
+#
+# accounts
+our %accounts = ();
+#$accounts{'id'} = { FUNC => \&runchild_pop3, CID => 'login:pass@host.dom:port', INT => 14, ADDH => "X-KMail-Identity: 1650900072\n" };
+#$accounts{'id'} = { FUNC => \&runchild_mbox, CID => '0:0@'.$ENV{MAIL}.':0', INT => 2, ADDH => "X-KMail-Identity: 1650900072\n" };
+#
+# note for CID - if :pass is not specified, user is asked once on start, if :port is not specified, 110 is used
+#
+# additional pars for pop3:
+# P3AM = auth-mode, can be one of BEST, APOP, PASS (see man Mail::POP3Client)
+# SPORT = local-secure-port, if defined, use connection over stunnel wrapper on that port
+
+# user function called (from parent process) with args account-def and exit-code(full,man-wait) from child
+#
+# return:
+# -1 if you don't want to run it again
+# 0 if you want to run it again
+# 1 if you don't want to run it again unless requested via aport
+#
+# exit codes:
+# 0x10 critical error with something left inconsistent
+# 0x11 means fatal error (invalid filename etc.)
+# 0x12 means unsuccesfull login (no route, ...)
+# 0x18 critical error in local delivery with something left inconsistent
+# 0x19 means local delivery problem
+our $c_funcexit = sub($$)
+{
+	my $d = shift;
+	my $r = shift;
+	$d->{OK} = 1, return 0 if ((($r&0x7f) != 0) || $r == 0);
+	return -1 if ($? == 0x1000 || $? == 0x1800);
+	return 1 if ($? == 0x1100);
+	return 0 if ($? == 0x1200);
+	return 1 if ($? == 0x1900);
+	return 0;
+};
+
+# user function called, when suspending running because of bad error code from $c_funcexit
+our $c_funcsuspend = sub($$)
+{
+	return;
+};
+
+# $c_deliverprog: deliver program (expanded by shell), it should read mail from stdin and return 0 if delivery was succesfull
+
+# --- config read ---
+# supposed perl file defining some vars above
+require $ARGV[0];
+
+# --- config finish ---
+
+foreach my $k (keys %accounts) {
+	my $a = $accounts{$k};
+	$a->{ID} = $k;
+	die "$k has invalid format in username\n" if ($a->{CID} !~ m/\@/);
+	die "$k ADDH doesn't end with new-line\n" if (defined ($a->{ADDH}) && $a->{ADDH} ne "" && substr($a->{ADDH}, length($a->{ADDH})-1) ne "\n");
+	next if ($a->{CID} =~ m/:.+@/);
+	system("stty -echo");
+	print("Give me password for $k: "); STDOUT->flush();
+	$_ = <STDIN>;
+	chomp;
+	system("stty echo");
+	die "failed to read password\n" if (!defined ($_));
+	print("\n");
+	substr($a->{CID}, index($a->{CID}, "@"), 0) = ":$_";
+}
+
+$SIG{TERM} = \&terminate_func;
+$SIG{INT} = \&terminate_func;
+$SIG{HUP} = 'IGNORE';
+
+our @query = ();
+our %running = ();
+our $st4conf;
+foreach my $c (values %accounts) {
+	$c->{NEXT} = time()+5; # wait for init childs
+	$c->{LNEXT} = 0;
+	push(@query, $c);
+	($c->{USER}, $c->{PASS}, $c->{SRV}, $c->{PORT}) = ($c->{CID} =~ m/^(.*):(.*)\@(.*?)(:\d+)?$/);
+	if ($c->{PASS} eq "_PGPASS") {
+		if (!defined $c_pgpassph) {
+			system("stty -echo");
+			print("Give me passphrase: "); STDOUT->flush();
+			$_ = <STDIN>;
+			chomp;
+			system("stty echo");
+			$c_pgpassph = $_;
+		}
+		my ($gfr, $gfw);
+		die "failed to pipe through gpg\n" if (!open2($gfr, $gfw, "gpg --passphrase-fd 0 -d --batch -q"));
+		#die "failed to pipe through gpg\n" if (!open2($gfr, $gfw, "cat >&2"));
+		($_ = $c->{PGPASS}) =~ s/^[ \t]//mg;
+		print($gfw "$c_pgpassph\n$_\n");
+		close($gfw);
+		chomp($c->{PASS} = <$gfr>);
+		close($gfr);
+		die "gpg exited with code $?\n" if ($? != 0);
+	}
+	$c->{PORT} = (defined ($c->{PORT}))?substr($c->{PORT}, 1):110;
+	if (defined($c->{SPORT})) {
+		if ($stunnel_ver == 3) {
+			my $p;
+			die "stunnel version 3 not supported now\n";
+			if (!defined ($p = fork())) {
+				die "failed to fork: $!\n";
+			}
+			elsif ($p == 0) {
+				exec("stunnel", "-D", "warning", "-P", "none", "-f", "-c", "-d", $c->{SPORT}, "-r", "$c->{SRV}:pop3s");
+				die "exec stunnel failed: $!\n";
+			}
+			else {
+				$child{$p} = \&kill_self;
+			}
+		}
+		else {
+			if (!defined $st4conf) {
+				$st4conf = "pid=\n\ndebug=3\noutput=/dev/stderr\n\nclient=yes\n\nforeground=yes\n\n";
+			}
+			$st4conf .= "[s$c->{SPORT}]\naccept=$c->{SPORT}\nconnect=$c->{SRV}:pop3s\n\n";
+		}
+		$c->{SRV} = "localhost"; $c->{PORT} = $c->{SPORT};
+	}
+}
+{
+	my $p = fork();
+	die "failed to fork: $!\n" if (!defined $p);
+	exit(0) if ($p != 0);
+	setsid();
+}
+if (defined $st4conf) {
+	my $p;
+
+	pipe(ST4CR, ST4CW);
+	if (!defined ($p = fork())) {
+		die "failed to fork: $!\n";
+	}
+	elsif ($p == 0) {
+		close(ST4CW);
+		die "failed to dup ST4CR to STDIN\n" if (fileno(STDIN) != fileno(ST4CR) && (!open(STDIN, "<&ST4CR") || !close(ST4CR)));
+		exec("stunnel4", "/dev/stdin");
+		die "exec stunnel failed: $!\n";
+	}
+	else {
+		$child{$p} = \&kill_self;
+		close(ST4CR);
+		print(ST4CW "$st4conf");
+		close(ST4CW);
+	}
+}
+
+erlog("PID: $$");
+if (defined ($aport)) {
+	socket(ASOCK, PF_INET, SOCK_STREAM, getprotobyname('ip')) || die "failed to create socket: $!\n";
+	setsockopt(ASOCK, SOL_SOCKET, SO_REUSEADDR, pack("l", 1));
+	bind(ASOCK, sockaddr_in($aport, INADDR_ANY)) || die "failed to bind ($!)\n";
+	($aport) = unpack_sockaddr_in(getsockname(ASOCK));
+	print("Using port $aport\n");
+	listen(ASOCK, SOMAXCONN) || die "failed to listen: $!\n";
+	pipe(RAF, WAF) or die "failed to create pipe: $!\n";
+}
+
+$SIG{CHLD} = sub {};
+$SIG{PIPE} = 'IGNORE';
+
+STDOUT->autoflush(1);
+STDERR->autoflush(1);
+
+for (;;) {
+	my $t = time();
+	my $sl;
+	my $p;
+	my @pend_q = ();
+
+	$sl = $query[0]->{NEXT}-$t if ($#query >= 0);
+
+	if (defined ($p = waitpid(-1, WNOHANG)) && $p > 0) {
+		&{$child{$p}} if (defined $child{$p});
+		if (defined (my $d = $running{$p})) {
+			my $i;
+			$d->{LNEXT} = $t+100;
+			$d->{NEXT} = $t+$d->{INT}*60;
+			#print("child for $d->{ID} exited with code $?\n");
+			undef($running{$p});
+			undef($d->{PID});
+			if ((my $x = &$c_funcexit($d, $?)) == 0) {
+				push(@pend_q, $d)
+			}
+			else {
+				$d->{LOCK} = $x;
+				&$c_funcsuspend($d, $x);
+				erlog("user function requested not to run '$d->{ID}' again...");
+			}
+		}
+	}
+	elsif (!defined ($sl) || $sl > 0) {
+		my $rb = '';
+		vec($rb, fileno(ASOCK), 1) = 1, vec($rb, fileno(RAF), 1) = 1 if (defined $aport);
+		if (select($rb, undef, undef, $sl) > 0) {
+			if (vec($rb, fileno(ASOCK), 1) != 0) {
+				if (!accept(RS, ASOCK)) {
+					# ignore...
+				}
+				if (!defined ($p = fork())) {
+					# ignore...
+				}
+				elsif ($p == 0) {
+					close(ASOCK);
+					runchild_readasock();
+					exit(0);
+				}
+				else {
+					close(RS);
+				}
+			}
+			if (vec($rb, fileno(RAF), 1) != 0) {
+				my $d;
+				my $id = "";
+				my %ga = ();
+				sysread(RAF, $id, 1024, length($id)) while (substr($id, length($id)-1) ne "\n"); # no a co, je to prasarna, no!
+				chomp $id;
+				foreach $id (split(/\n/s, $id)) {
+					my $d;
+					$id =~ s/\s*$//;
+					erlog("bad account $id specified"), next if (!defined ($d = $accounts{$id}));
+					next if (defined ($ga{$id}));
+					$ga{$id} = 1;
+					$d->{IMDR} = 1;
+					for (my $i = 0; $i <= $#query; $i++) {
+						splice(@query, $i, 1), last if ($query[$i] == $d);
+					}
+					if (!defined ($d->{PID}) && (!defined ($d->{LOCK}) || $d->{LOCK} >= 0)) {
+						push(@pend_q, $d) 
+					}
+					else {
+						erlog("account $id has been locked and cannot be added again");
+					}
+				}
+			}
+		}
+	}
+	else { # run next child
+		if (!defined ($p = fork())) {
+			die "failed to fork: $!\n";
+		}
+		elsif ($p == 0) {
+			my $d = shift(@query);
+			$ENV{DOWNMAILID} = $d->{ID};
+			exit(&{$d->{FUNC}}($d));
+		}
+		else {
+			$running{$p} = shift(@query);
+			$running{$p}->{PID} = $p;
+			#print("ran child for id $running{$p}->{ID}\n");
+		}
+	}
+	foreach my $d (@pend_q) {
+		if (defined ($d->{IMDR})) {
+			undef $d->{IMDR};
+			$d->{NEXT} = $d->{LNEXT};
+		}
+		my $i;
+		for ($i = 0; $i <= $#query; $i++) {
+			last if ($d->{NEXT} < $query[$i]->{NEXT});
+		}
+		splice(@query, $i, 0, $d);
+	}
+}

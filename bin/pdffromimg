@@ -1,0 +1,28 @@
+#!/bin/bash -e
+
+if [ $# -lt 3 ]; then
+	echo "Usage: $0 outfile resize image-list" >&2
+fi
+
+out=$1
+resize=$2
+shift; shift
+
+if echo $out | grep -v '\.pdf$'; then
+	echo "Output file must end with pdf" >&2
+	exit 2
+fi
+if echo $resize | egrep -v '^[0-9]+%$'; then
+	echo "Resize must be xyz%" >&2
+	exit 2
+fi
+
+c=0
+for fn in $*; do
+	suf=`printf %04d $c`
+	convert -resize $resize $fn conv-$suf.jpeg
+	let c=c+1
+done
+
+convert conv-0*.jpeg $out
+rm conv-*.jpeg

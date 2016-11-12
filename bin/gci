@@ -1,0 +1,13 @@
+#!/bin/sh
+
+main=
+if [ "x$1" = "x-C" ]; then
+	main="$main $1 $2"; shift; shift
+fi
+
+date=$1; shift
+if [ $OSTYPE = "Linux" ]; then
+	date=`date -d "$1"`
+fi
+msg="$1"; shift
+GIT_COMMITTER_DATE="$date" git $main commit --date="$date" -m "$msg" $*

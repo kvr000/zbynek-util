@@ -1,0 +1,18 @@
+#!/bin/sh
+
+report_exit()
+{
+	echo "$*" >&2
+	exit 2
+}
+
+pkg_name=`basename $PWD`
+if [ ! -d CONTENT ]; then
+	report_exit cannot find dirrectory CONTENT
+fi
+mkdir -p debian
+if [ ! -f debian/changelog ]; then
+	echo > debian/changelog
+fi
+
+dpkg-buildpackage

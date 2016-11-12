@@ -1,0 +1,67 @@
+#!/usr/bin/perl -w
+
+use strict;
+use warnings;
+
+use MIME::Base64;
+use IO::Handle;
+use IPC::Open2;
+use Getopt::Long;
+use Fcntl;
+use POSIX;
+
+sub check_opt($)
+{
+	my $o = shift;
+	foreach (@ARGV) {
+		return 1 if (index($_, $o) == 0 && (length($_) == length($o) || substr($_, length($o), 1) eq "="));
+	}
+	return 0;
+}
+
+my $use_rcpt = 0;
+my $use_passph;
+
+if (!check_opt("-r") && defined $ENV{PGRCPT}) {
+	$use_rcpt = 1;
+	unshift(@ARGV, "-r", $ENV{PGRCPT});
+}
+if (!check_opt("--passphrase-fd") && defined $ENV{PGPASSPH}) {
+	$use_passph = $ENV{PGPASSPH};
+	pipe(GFR, GFW);
+	unshift(@ARGV, "--passphrase-fd=".fileno(GFR)."");
+}
+if (!check_opt("-z")) {
+	unshift(@ARGV, "-z", "9");
+}
+
+unshift(@ARGV, "-q") if (!check_opt("-q"));
+unshift(@ARGV, "--batch") if (!check_opt("--batch") && defined $use_passph);
+
+my $p;
+if (!defined ($p = fork())) {
+	die "failed to fork: $!\n";
+}
+elsif ($p == 0) {
+	if (defined $use_passph) {
+		close(GFW);
+		fcntl(GFR, F_SETFD, 0);
+	}
+	exec("gpg", @ARGV);
+}
+else {
+	my $lexit = 0;
+	if (defined $use_passph) {
+		close(GFR);
+		$use_passph = decode_base64($1) if ($use_passph =~ m/^enc:(.*)/);
+		print(GFW $use_passph);
+		close(GFW);
+	}
+	$lexit = $? while (waitpid($p, 0) >= 0);
+	if (($lexit&127) != 0) {
+		kill($lexit&127, getpid());
+	}
+	else {
+		exit($lexit>>8);
+	}
+}

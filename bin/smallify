@@ -1,0 +1,27 @@
+#!/bin/sh
+
+set -e
+
+if [ $# -eq 0 ] || [ "x$1" = "x-h" ]; then
+	echo "Usage: $0 [-d dir] resize-level list-of-files" >&2
+	echo "Example: $0 -d .. x750 *.jpg" >&2
+	echo "Example: $0 -d thumb 20% *.jpg" >&2
+	exit 2
+fi
+
+dir=
+
+if [ "x$1" = "x-d" ]; then
+	dir=$2; shift; shift
+fi
+resize=$1; shift
+
+for f; do
+	if [ -n "$dir" ]; then
+		n=$dir/$f
+	else
+		n=${f%.jpg}-small.jpg
+	fi
+	echo $f $n >&2
+	cp $f $n && mogrify -resize $resize $n
+done

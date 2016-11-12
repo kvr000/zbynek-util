@@ -1,0 +1,10 @@
+#!/bin/sh
+
+nice=-1
+
+if [ "x$1" = "x--nonice" ]; then
+	shift
+	nice=
+fi
+
+exec nice $nice make -j5 "$@"

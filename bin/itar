@@ -1,0 +1,129 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+use FileHandle;
+use IO::Pipe;
+use IO::Zlib;
+use Archive::Tar;
+
+eval {
+	#use Sys::Mlockall qw(:all);
+	#mlockall(MCL_FUTURE|MCL_CURRENT) == 0 or die "$!";
+}
+	or warn "failed to lock memory: $@";
+
+die "usage: $0 tar-archive (optionally gzip/bzip2-ed and/or gpg-ed)" unless (@ARGV >= 1 && @ARGV <= 4);
+
+my $infd;
+my $filename = shift @ARGV
+	or die "Usage: $0 tar-file [in-file [filter [key]]]";
+
+if ($filename =~ /^(.*)\.gpg/) {
+	$infd = IO::Pipe->new();
+	$infd->reader("gpgphe -d $filename");
+	$filename = $1;
+}
+else {
+	$infd = FileHandle->new($filename, "<");
+}
+
+if ($filename =~ m/^(.*)\.(gz|tgz)$/) {
+	$infd = IO::Zlib->new($infd, "rb");
+	$filename = $1;
+}
+elsif ($filename =~ m/^(.*)\.bz2$/) {
+	pipe(my $rh, my $wh)
+		or die "failed to create pipe: $!";
+	if (fork() == 0) {
+		open(STDIN, "<&", $infd)
+			or die "failed to dup to STDIN: $!";
+		open(STDOUT, ">&", $wh)
+			or die "failed to dup to STDOUT: $!";
+		exec("bzip2", "-d");
+		die "failed to exec bzip2: $!";
+	}
+	else {
+		undef $wh;
+		$infd = $rh;
+	}
+}
+elsif ($filename =~ m/^(.*)\.xz$/) {
+	pipe(my $rh, my $wh)
+		or die "failed to create pipe: $!";
+	if (fork() == 0) {
+		open(STDIN, "<&", $infd)
+			or die "failed to dup to STDIN: $!";
+		open(STDOUT, ">&", $wh)
+			or die "failed to dup to STDOUT: $!";
+		exec("pxz", "-d") or exec("xz", "-d");
+		die "failed to exec xz: $!";
+	}
+	else {
+		undef $wh;
+		$infd = $rh;
+	}
+}
+my $tar = Archive::Tar->new($infd, 0);
+
+if (@ARGV) {
+	my $in_file = shift @ARGV;
+	my $content = $tar->get_content($in_file);
+	die "file $in_file does not exist" unless (defined $content);
+	if (@ARGV) {
+		my @filters = split(/,/, shift @ARGV);
+		my $out = (grep({ my $found = 1; foreach my $filter (@filters) { $found = 0 unless (m/$filter\s+/) }; $found } split(/\n/, $content)))[0];
+		if (!$out) {
+			die "file does not contain the filtered line";
+		}
+		if (@ARGV) {
+			my @keys = split(/,/, shift @ARGV);
+			my @values;
+			foreach my $key (@keys) {
+				my $value = (split(/=/, (grep({ m/^$key=/ } split(/\s+/, $out)))[0]))[1];
+				if (!defined $value) {
+					die "key not found in the filtered line";
+				}
+				push(@values, $value);
+			}
+			print(join("\n", @values));
+		}
+		else {
+			print($out);
+		}
+	}
+	else {
+		print($content);
+	}
+}
+else {
+	foreach my $f (sort({ $a cmp $b } $tar->list_files())) {
+		printf("%s\n", $f);
+	}
+	print("itar\$ ");
+	while (<>) {
+		next unless (m/^(\S+)\s*(.*?)\s*$/);
+		if ($1 eq "l") {
+			foreach my $f (sort({ $a cmp $b } $tar->list_files())) {
+				if (length($2)) {
+					next unless ($f =~ m/$2/);
+				}
+				printf("%s\n", $f);
+			}
+		}
+		elsif ($1 eq "c") {
+			print($tar->get_content($2));
+		}
+		elsif ($1 eq "s") {
+			print("failed: $!\n") unless ($tar->extract_file($2));
+		}
+		elsif ($1 eq "x") {
+			last;
+		}
+		else {
+			print("invalid command: $1\n");
+		}
+		print("itar\$ ");
+	}
+}

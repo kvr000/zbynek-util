@@ -1,0 +1,11 @@
+#!/bin/bash
+
+for f; do
+	tmfmt=`exiftool -TAG -CreateDate "$f"`
+	if [ -z "$tmfmt" ]; then
+		echo "No time in $f" >&2
+	else
+		tmt=`echo $tmfmt | sed -e 's/.* \+: \+//' -e 's/://' -e 's/://' -e 's/ //' -e 's/://' -e 's/:/./'`
+		touch -t "$tmt" "$f"
+	fi
+done

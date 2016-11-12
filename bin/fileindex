@@ -1,0 +1,131 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+
+use FileHandle;
+use Getopt::Std;
+use Digest::MD5;
+use Time::Local;
+use POSIX qw(strftime);
+
+
+our %opts;
+
+
+sub readIndex()
+{
+	my @list = ();
+	my $fd = FileHandle->new("file.idx", "<:raw")
+		or die "failed to open file.idx: $!";
+	while (<$fd>) {
+		chomp;
+		die "failed to match index line: $_" unless (m/^(\w+)\s+(\d+)\s+(\d+)-(\d+)-(\d+)T(\d+):(\d+):(\d+)\s+(.*)$/);
+		push(@list, { hash => $1, size => $2, mtime => timegm($8, $7, $6, $5, $4-1, $3-1900), fname => $9, full => $_ });
+	}
+	return @list;
+}
+
+sub formatIndexLine($)
+{
+	my $file = shift;
+	return sprintf("%32s %12d %19s %s\n", $file->{hash}, $file->{size}, strftime("%FT%T", gmtime($file->{mtime})), $file->{fname});
+}
+
+sub writeIndex(@)
+{
+	my $fd = FileHandle->new("file-new.idx", ">:raw");
+
+	no locale;
+	foreach (sort( { $a->{fname} cmp $b->{fname} } @_)) {
+		$fd->print(formatIndexLine($_));
+	}
+	$fd->close()
+		or die "failed to update index: $!";
+	return;
+	rename("file-new.idx", "file.idx")
+		or die "failed to rename file-new.idx to file.idx: $!";
+}
+
+sub runPrintDups()
+{
+	my %index_hash;
+
+	foreach (readIndex()) {
+		push(@{$index_hash{$_->{hash}}}, $_);
+	}
+
+	no locale;
+	foreach my $index_entry (sort( { $a->[0]->{fname} cmp $b->[0]->{fname} } grep( { $#$_ > 0 } values %index_hash))) {
+		foreach my $file (@$index_entry) {
+			print("$file->{full}\n");
+		}
+	}
+}
+
+sub runUpdateIndex()
+{
+	my %index_fname;
+
+	foreach (readIndex()) {
+		$index_fname{$_->{fname}} = $_;
+	}
+
+	my $fdidx = FileHandle->new("file.idx", ">>:raw");
+	my @list;
+	my $total = 0;
+
+	while (<>) {
+		chomp;
+		my @st = stat($_)
+			or die "failed to stat $_: $!";
+		my $file;
+		if (defined ($file = $index_fname{$_}) && $file->{size} == $st[7] && $file->{mtime} == $st[9]) {
+		}
+		else {
+			STDERR->print("reindexing $_ (size=$st[7])\n");
+			$total += $st[7];
+			my $md5 = Digest::MD5->new();
+			if (!$opts{t}) {
+				$md5->addfile(FileHandle->new($_, "<:raw") or die "failed to open $_: $!");
+				$file = { hash => $md5->hexdigest(), size => $st[7], mtime => $st[9], fname => $_ };
+				$fdidx->print(formatIndexLine($file));
+				$fdidx->flush();
+			}
+			else {
+				next;
+			}
+		}
+		push(@list, $file);
+	}
+	$fdidx->close(); undef $fdidx;
+	STDERR->print("reindexed $total bytes\n");
+
+	return if ($opts{t});
+	if (!@list && !$opts{f}) {
+		die "input list is empty, use -f to force creation of empty index file";
+	}
+	writeIndex(@list);
+}
+
+getopts("fupth", \%opts)
+	or die "Usage: $0 [-f] [-t] {-u|-p|-h}\n";
+
+if ($opts{p}) {
+	runPrintDups();
+}
+elsif ($opts{u}) {
+	runUpdateIndex();
+}
+else {
+	STDERR->print(<<EOS
+Usage: $0 [-f] [-t] {-u|-p|-h}
+-f		force update even if the input is empty
+-u		update the index file
+-p		print duplicates
+-t		test, only print what would have been done
+-h		print this help
+EOS
+	);
+	exit(2);
+}

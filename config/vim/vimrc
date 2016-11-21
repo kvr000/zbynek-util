@@ -1,0 +1,207 @@
+" " " vimrc - ViM local init script
+" " " Written by Zbynek Vyskovsky
+" " " (rat@atrey.karlin.mff.cuni.cz, http://atrey.karlin.mff.cuni.cz/~rat)
+" " " Last update: 2000-09-14
+
+" " " this script should call and is called from global vimrc and is used
+" " " for local init settings, variable localrcst defines position in vimrc
+
+function LIx()
+	" " see |x-section| in glvimrc
+
+	" set directory for swap files
+	set directory=~/tmp,/tmp
+	" word-characters
+	set iskeyword=@,48-57,_,128-255
+	set shellpipe=2>&1\ \|tee
+	set makeprg=ncmake
+	set grepprg=grep\ --exclude-dir=.svn\ -n\ $*\ /dev/null
+	if (!has("guirunning"))
+		set mouse=
+	endif
+
+	if filereadable(g:globexfiledir."/locterms.vim")
+		exec "source ".g:globexfiledir."/locterms.vim"
+	endif
+endfunction
+
+function LIa()
+	" " see |a-section| in glvimrc
+
+	" |local-destroy-fr-autocommand|
+	augroup fr_
+		"autocmd BufRead,BufNewFile * if exists("b:frtype") | endif
+	augroup END
+endfunction
+
+function LI9()
+	" " see |9-section| in glvimrc
+
+	if exists("g:keyboard") && filereadable(g:globexfiledir."/lang-cz.vim")
+		exec "source ".g:globexfiledir."/lang-cz.vim"
+	endif
+
+	" |extended-curdir-vimrc| or |curdir-vimrc|
+	if exists("g:lvimfpr")
+		if g:rwdstat >= 0 && filereadable(g:lvimfpr."rcx")
+			exec "source ".g:lvimfpr."rcx"
+		elseif g:rwdstat == 1 && filereadable(g:lvimfpr."rc")
+			exec "source ".g:lvimfpr."rc"
+		endif
+	endif
+endfunction
+
+
+" " see |0-section| in glvimrc
+
+" get info about current directory and set variable wdstat to:
+" -2: unsafe, in non-user's directory or in shadow vim-directory
+" -1: unsafe, in user's public directory
+"  0: in user's directory, where is his .vimrc
+"  1: in another user's directory
+let wd=getcwd()
+let home=$HOME
+if wd =~ home.'^pub\(\|/.\+\)$'
+	let wdstat=-1
+elseif wd =~ home.'/.svim\(\|/.\+\)$'
+	let wdstat=-2
+elseif wd =~ home.'$'
+	let wdstat=0
+elseif wd =~ home.'/\.\.\./drftp\(\|/.*\)$'
+	let wdstat=-2
+elseif wd =~ home.'/duso\(\|/.*\)$'
+	let lvimfpr=home.'/.svim/-/duso/.vim'
+	let wdstat=-2
+elseif wd =~ home.'/d/drt\(\|/.*\)$'
+	let lvimfpr=home.'/.vim/project/drt/.vim'
+	let wdstat=-2
+elseif wd =~ home.'/d/jtry\(\|/.*\)$'
+	let lvimfpr=home.'/d/.config/.vim/jtry/.vim'
+	let wdstat=-2
+elseif wd =~ home.'/devel/drt/\(drt-[^/]*\).*'
+	let lvimfpr=home.'/.svim/-/drt/.vim'
+	let drtpath=substitute(wd, '^\('.home.'/devel/drt/drt-[^/]*\).*$', '\1', '')
+	let wdstat=-2
+elseif wd =~ home.'/.\+'
+	let wdstat=1
+else
+	let wdstat=-2
+endif
+" set lvimfpr .vim (if safe) or to <shadow rc/info directory>/.vim (if unsafe)
+if exists("lvimfpr")
+	if !exists("rwdstat")
+		let rwdstat=1
+	endif
+elseif wdstat >= 0
+	let lvimfpr=".vim"
+	let rwdstat=wdstat
+elseif wd =~ '/mnt/\(dos\|d1\|d2\)/.*'
+	let lvimfpr=$HOME.'/.svim/'.substitute(wd, '\/mnt\/\(dos\|d1\|d2\)\/', 'd-\1\/', '').'/.vim'
+	let rwdstat=1
+elseif wd =~ '^/usr/src/linux\(-[0-9.]*\|\)\(/.*\|\)$'
+	let lvimfpr=$HOME.'/.svim/usr/src/linux/.vim'
+	let rwdstat=1
+elseif wd =~ '^'.$HOME.'/'
+	let lvimfpr=$HOME.'/.svim/-'.strpart(wd, strlen($HOME), 100).'/.vim'
+	let rwdstat=1
+else
+	let lvimfpr=$HOME.'/.svim'.wd.'/.vim'
+	let rwdstat=1
+endif
+
+set runtimepath+=$HOME/.config/.vim/after
+
+" |extended-curdir-vimrc|, execute only if in user's directory
+if rwdstat >= 0 && exists("lvimfpr")
+	if filereadable(lvimfpr."rcx")
+		exec "source ".lvimfpr."rcx"
+	endif
+endif
+
+" |localrcfile|
+if !exists("localrcfile")
+	let localrcfile=expand("<sfile>")
+endif
+
+" directory containing ex-files
+if !exists("globexfiledir")
+	let globexfiledir=$HOME."/.config/vim"
+endif
+
+" |guiwinshell|
+if !exists("guiwinshell")
+	let guiwinshell='frun xterm +ls -geometry 120x40 -e'
+endif
+
+" |cincludedirs|
+if !exists("cincludedirs")
+	let cincludedirs="/usr/include,/usr/X11R6/include,."
+endif
+
+" |keywordprgval|, |ckeywordprgval|
+if !exists("keywordprgval")
+	let keywordprgval='man'
+endif
+if !exists("ckeywordprgval")
+	let ckeywordprgval='man -S 2:3'
+endif
+
+" |sfttimezone|
+if !exists("sfttimezone")
+	let sfttimezone="%Z"
+endif
+
+" |name|, |email|, |www|
+if !exists("name")
+	let name="Zbyněk Vyškovský"
+endif
+if !exists("email")
+	let email='kvr@centrum.cz'
+endif
+if !exists("www")
+	let www='http://kvr.matfyz.cz'
+endif
+
+" |usegzautocmd|
+if !exists("usegzautocmd")
+	let usegzautocmd='*'
+endif
+
+" |viminfodef|
+if !exists("viminfodef")
+	let viminfodef="'50,\"20,:50,/30,%,h,!,r/usr,r/tmp,ninfo"
+endif
+
+" |guifontval|, |guicolsval|, |guilinesval|
+if !exists("guifontval")
+	"let guifontval='-adobe-courier-bold-r-normal-*-*-100-*-*-m-*-iso8859-2'
+	"let guifontval='FreeMono Bold 12'
+	let guifontval='DejaVu Sans Mono Bold 12'
+	"let guifontval='/usr/share/fonts/truetype/Courier_New_Bold.ttf 11'
+endif
+if !exists("guicolsval")
+	let guicolsval=181
+endif
+if !exists("guilinesval")
+	let guilinesval=55
+endif
+
+" variable identifying keyboard
+if !exists("keyboard")
+	let keyboard="utf8:cz"
+endif
+
+" syntax variables
+if !exists("mysyntaxfile")
+	let mysyntaxfile=globexfiledir."/mysyntax.vim"
+endif
+
+"set runtimepath+=/usr/share/vim-scripts,/usr/share/vim-scripts/after
+
+exec "source ".globexfiledir."/glvimrc.vim"
+
+delfunction LIa
+delfunction LIx
+delfunction LI9
+
+" last check to override "going to run"

@@ -1,0 +1,29 @@
+#!/bin/sh
+
+set -e
+
+DEST="$HOME"
+if [ ! -d "$PWD/global/" ]; then
+	echo "Directory global must exist in current directory: $PWD/global" >&2
+	exit 127
+fi
+DIR="$PWD/global"
+if [ ! -f "$DIR/_is_global" ]; then
+	echo "Cannot find _is_global in $DIR" >&2
+	exit 127
+fi
+
+mkdir -p "$DEST/bin"
+for f in "$DIR"/bin/*; do
+	ln -sf "$f" "$DEST/bin/"
+done
+
+mkdir -p "$DEST/.config/_global/config"
+for f in "$DIR"/config/*; do
+	ln -sf "$f" "$DEST/.config/_global/"
+done
+
+ln -sf ".config/_global/shell/profile_all" $DEST/.bash_profile
+ln -sf ".config/_global/shell/profile_all" $DEST/.zprofile
+ln -sf ".config/_global/shell/shrc_all" $DEST/.bashrc
+ln -sf ".config/_global/shell/shrc_all" $DEST/.zshrc

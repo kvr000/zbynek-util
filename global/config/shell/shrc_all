@@ -1,0 +1,5 @@
+for s in _global _user _company; do
+	f="$HOME/.config/$s/shell/shrc$s"
+	[ -f $f ] && . $f
+done
+

@@ -1,0 +1,32 @@
+[ -d /usr/bin/X11 ] && PATH=$PATH:/usr/bin/X11
+PATH=/sbin:/usr/sbin:$PATH
+case `uname -s` in
+SunOS)
+	PATH=/usr/ccs/bin:/usr/xpg4/bin:$PATH
+	;;
+esac
+PATH=/usr/local/bin:$PATH
+bsuff=`uname -s -m | sed 's/ /-/'`
+export PATH=$HOME/platf.$bsuff/bin:$HOME/bin:$PATH
+export PERL5LIB=$HOME/perl5
+export LD_LIBRARY_PATH=$HOME/platf.$bsuff/lib:$LD_LIBRARY_PATH
+
+unset LESS
+
+if which less >/dev/null 2>&1; then
+	export PAGER=less
+fi
+if which vim >/dev/null 2>&1; then
+	export EDITOR=`which vim`
+fi
+
+case $SHELL in
+	*/zsh)
+		export PS1='%n@%m:%~$ '
+		;;
+
+	*)
+		export PS1='\u@\h:\w$ '
+		;;
+		
+esac

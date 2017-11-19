@@ -1,0 +1,30 @@
+#!/bin/sh
+
+set -e
+
+if [ $# -ne 1 ] || [ ! -d "$1" ]; then
+	echo "Argument must be provided where files for company exist" >&2
+	exit 127
+fi
+DIR="$1"
+if ! echo "$DIR" | grep ^/ >/dev/null; then
+	echo "Full source path must be provided: $DIR" >&2
+	exit 127
+fi
+if [ ! -f "$DIR/_is_company" ]; then
+	echo "Cannot find _is_company in $DIR" >&2
+	exit 127
+fi
+DEST="$HOME"
+
+if [ -d "$DIR/bin" ]; then
+	mkdir -p "$DEST/bin"
+	for f in "$DIR"/bin/*; do
+		ln -sf "$f" "$DEST/bin/"
+	done
+fi
+
+mkdir -p "$DEST/.config/_company"
+for f in "$DIR"/config/*; do
+	ln -sf "$f" "$DEST/.config/_company/"
+done

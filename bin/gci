@@ -10,4 +10,4 @@ date=$1; shift
 #	date=`date -d "$1"`
 #fi
 msg="$1"; shift
-GIT_COMMITTER_DATE="$date" git $main commit --date="$date" -m "$msg" $*
+faketime "$date" git $main commit --date="$date" -m "$msg" "$@"

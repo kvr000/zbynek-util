@@ -1,2 +1,4 @@
 x=${PGRCPT:=kvr@centrum.cz}
 export PGRCPT
+
+set -o vi

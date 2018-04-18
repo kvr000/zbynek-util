@@ -118,6 +118,11 @@ else {
 		elsif ($1 eq "s") {
 			print("failed: $!\n") unless ($tar->extract_file($2));
 		}
+		elsif ($1 eq "g") {
+			my $suffix = $2;
+			eval "use Digest::SHA3; use Text::Trim; use MIME::Base64::URLSafe; 1;" or die $@;
+			STDOUT->say(MIME::Base64::URLSafe::encode(MIME::Base64::URLSafe::decode(Digest::SHA3::sha3_384_base64(Text::Trim::trim($tar->get_content("pw/_"))."-".$suffix))));
+		}
 		elsif ($1 eq "x") {
 			last;
 		}

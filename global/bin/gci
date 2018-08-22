@@ -6,8 +6,9 @@ if [ "x$1" = "x-C" ]; then
 fi
 
 date=$1; shift
+gdate=`faketime -f "$date" date`
 #if [ $OSTYPE = "Linux" ]; then
 #	date=`date -d "$1"`
 #fi
 msg="$1"; shift
-faketime "$date" git $main commit --date="$date" -m "$msg" "$@"
+faketime -f "$date" git $main commit --date="$gdate" -m "$msg" "$@"

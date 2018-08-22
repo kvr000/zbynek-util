@@ -1,0 +1,16 @@
+#!/bin/sh
+
+set -e
+
+main=
+if [ "x$1" = "x-C" ]; then
+	main="$main $1 $2"; shift; shift
+fi
+
+if [ $# -gt 0 ]; then
+	date=$1; shift
+else
+	date=`git $main show --date=iso | grep ^Date: | sed 's/^Date:[ 	]*//'`
+fi
+gdate=`faketime -f "@$date" date`
+faketime -f "$date" git $main commit --date="$gdate" --amend --no-edit $*

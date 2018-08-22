@@ -1,4 +1,4 @@
-#!/usr/bin/perl -w
+#!/usr/bin/env perl
 #
 # by Zbynek Vyskovsky (kvr@centrum.cz, http://kvr.matfyz.cz)
 # licence (if needed ;) ) is GPL

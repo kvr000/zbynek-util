@@ -18,7 +18,7 @@ for f in "$DIR"/bin/*; do
 	ln -sf "$f" "$DEST/bin/"
 done
 
-mkdir -p "$DEST/.config/_global/config"
+mkdir -p "$DEST/.config/_global"
 for f in "$DIR"/config/*; do
 	ln -sf "$f" "$DEST/.config/_global/"
 done

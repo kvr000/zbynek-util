@@ -42,10 +42,15 @@ alias vi='vim'
 alias mc='mc -c'
 alias iks='startx --'
 alias iksa='(startx --&)>/dev/null 2>&1'
-alias ct=cleartool
 alias se='slovnik -e'
 alias sc='slovnik -c'
 
-alias mp3='mpg123 -v'
-alias setgr='setterm -foreground green -background black -bold off -store'
-alias sff='setfont lat2-12'
+if [ -n "$ZSH_VERSION" ]; then
+	HISTFILE=~/.local/zsh_history
+	setopt appendhistory
+	PS1='%n@%m:%~$ '
+else
+	PS1='\u@\h:\w$ '
+fi
+HISTSIZE=1000
+HISTCONTROL=ignoreboth

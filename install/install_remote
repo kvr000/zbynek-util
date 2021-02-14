@@ -1,0 +1,66 @@
+#!/bin/sh
+
+set -e
+
+if [ $# -ne 4 ]; then
+	echo "Usage: $0 global-dir user-dir company-dir destination(SSH)" >&2
+fi
+
+globalDir=$1
+userDir=$2
+companyDir=$3
+destination=$4
+
+if [ -n "$globalDir" ]; then
+	if [ ! -d "$globalDir" ]; then
+		echo "Directory $globalDir must exist" >&2
+		exit 127
+	fi
+	if [ ! -f "$globalDir/_is_global" ]; then
+		echo "Cannot find _is_global in $globalDir" >&2
+		exit 127
+	fi
+fi
+
+if [ -n "$userDir" ]; then
+	if [ ! -d "$userDir" ]; then
+		echo "Directory $userDir must exist" >&2
+		exit 127
+	fi
+	if [ ! -f "$userDir/_is_user" ]; then
+		echo "Cannot find _is_user in $userDir" >&2
+		exit 127
+	fi
+fi
+
+if [ -n "$companyDir" ]; then
+	if [ ! -d "$companyDir" ]; then
+		echo "Directory $companyDir must exist" >&2
+		exit 127
+	fi
+	if [ ! -f "$companyDir/_is_company" ]; then
+		echo "Cannot find _is_company in $companyDir" >&2
+		exit 127
+	fi
+fi
+
+
+if [ -n "$globalDir" ]; then
+	ssh $destination "mkdir -p .config/_global"
+	scp -r $globalDir/config/* $destination:.config/_global/.
+
+	ssh $destination "ln -sf .config/_global/shell/profile_all .bash_profile"
+	ssh $destination "ln -sf .config/_global/shell/profile_all .zprofile"
+	ssh $destination "ln -sf .config/_global/shell/shrc_all .bashrc"
+	ssh $destination "ln -sf .config/_global/shell/shrc_all .zshrc"
+fi
+
+if [ -n "$userDir" ]; then
+	ssh $destination "mkdir -p .config/_user"
+	scp -r $userDir/config/* $destination:.config/_user/.
+fi
+
+if [ -n "$companyDir" ]; then
+	ssh $destination "mkdir -p .config/_company"
+	scp -r $companyDir/config/* $destination:.config/_company/.
+fi

@@ -367,6 +367,7 @@ inoreab Ywww <C-R>=www<CR>
 
 " " " *autocommands*
 " " see `Don't inherit options' in Special-routines
+au BufNewFile,BufRead *.mi set ft=mason
 
 " set local autocommands and local main-pre-autocommand
 if exists("*LIa")

@@ -73,14 +73,10 @@ elseif wd =~ home.'/duso\(\|/.*\)$'
 	let lvimfpr=home.'/.svim/-/duso/.vim'
 	let wdstat=-2
 elseif wd =~ home.'/d/drt\(\|/.*\)$'
-	let lvimfpr=home.'/.vim/project/drt/.vim'
+	let lvimfpr=home.'/.config/vim/project/drt/.vim'
 	let wdstat=-2
 elseif wd =~ home.'/d/jtry\(\|/.*\)$'
-	let lvimfpr=home.'/d/.config/.vim/jtry/.vim'
-	let wdstat=-2
-elseif wd =~ home.'/devel/drt/\(drt-[^/]*\).*'
-	let lvimfpr=home.'/.svim/-/drt/.vim'
-	let drtpath=substitute(wd, '^\('.home.'/devel/drt/drt-[^/]*\).*$', '\1', '')
+	let lvimfpr=home.'/.config/vim/project/jtry/.vim'
 	let wdstat=-2
 elseif wd =~ home.'/.\+'
 	let wdstat=1
@@ -180,10 +176,10 @@ if !exists("guifontval")
 	"let guifontval='/usr/share/fonts/truetype/Courier_New_Bold.ttf 11'
 endif
 if !exists("guicolsval")
-	let guicolsval=181
+	let guicolsval=999
 endif
 if !exists("guilinesval")
-	let guilinesval=55
+	let guilinesval=999
 endif
 
 " variable identifying keyboard

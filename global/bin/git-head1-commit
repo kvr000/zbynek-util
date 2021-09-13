@@ -1,0 +1,18 @@
+#!/bin/sh
+
+set -e
+
+noabort=true
+nopop=true
+
+trap '$noabort || ( echo Aborting; git rebase --abort ); $nopop || ( echo Popping; git stash pop )' EXIT
+
+git stash push
+nopop=false
+EDITOR='sh -c "( echo e HEAD~1 && echo p HEAD~0 ) > $1"' git rebase -i HEAD~2
+noabort=false
+git stash pop
+git commit -a --amend --no-edit $@
+git rebase --continue
+noabort=true
+nopop=true

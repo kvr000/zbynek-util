@@ -7,4 +7,4 @@ if [ "x$1" = "x--nonice" ]; then
 	nice=
 fi
 
-exec nice $nice make -j5 "$@"
+exec nice $nice make -j`getconf _NPROCESSORS_ONLN` "$@"

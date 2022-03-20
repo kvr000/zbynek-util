@@ -1,4 +1,4 @@
-for s in _global _user _company; do
+for s in _global _user _company _local; do
 	f="$HOME/.config/$s/shell/profile$s"
 	[ -f $f ] && . $f
 done

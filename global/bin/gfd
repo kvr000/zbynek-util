@@ -2,15 +2,17 @@
 
 set -e
 
-main=
+globalOpt=
 if [ "x$1" = "x-C" ]; then
-	main="$main $1 $2"; shift; shift
+	globalOpt="$globalOpt $1 $2"; shift; shift
 fi
 
 if [ $# -gt 0 ]; then
-	date=$1; shift
+	date="$1"; shift
 else
-	date=`git $main show --date=iso | grep ^Date: | sed 's/^Date:[ 	]*//'`
+	date="`git $globalOpt show --date=iso | grep ^Date: | sed 's/^Date:[ 	]*//'`"
 fi
-gdate=`faketime -f "@$date" date`
-faketime -f "$date" git $main commit --date="$gdate" --amend --no-edit $*
+gdate="$date"
+export GIT_AUTHOR_DATE="$gdate"
+export GIT_COMMITTER_DATE="$gdate"
+git $globalOpt commit --date="$gdate" --amend --no-edit "$@"

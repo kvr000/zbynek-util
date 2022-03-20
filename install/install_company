@@ -28,3 +28,32 @@ mkdir -p "$DEST/.config/_company"
 for f in "$DIR"/config/*; do
 	ln -sf "$f" "$DEST/.config/_company/"
 done
+
+for d in `cat $DIR/_shared`; do
+	(
+		cd "$DEST/.config/"
+		if [ ! -d "$DEST/.config/_company/$d" ]; then
+			echo "Directory does not exist: $DEST/.config/_company/$d"
+			exit 127
+		fi
+		mkdir -p $d
+		for f in `find _user/$d/ -mindepth 1 -maxdepth 1`; do
+			ln -sf `echo $d/ | sed 's,[^/]\+/\+,../,g'`$f $d/
+		done
+	)
+done
+
+(
+	cd "$DIR"
+	for f in `find .`; do
+		if [ -L $f ]; then
+			ln -sf "`readlink $f`" "$DEST/$f"
+		elif [ -d $f ]; then
+			mkdir -p "$DEST/$f"
+		elif [ -f $f ]; then
+			ln -sf "$PWD/$f" "$DEST/$f"
+		else
+			echo "Cannot process unknown file type: $f" >&2
+		fi
+	done
+)

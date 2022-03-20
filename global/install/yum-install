@@ -2,11 +2,12 @@
 
 set -e
 
-sudo yum -y install coreutils gnupg2 jq libfaketime parallel telnet lynx
+sudo yum -y install coreutils gnupg2 jq libfaketime parallel telnet lynx htop
 sudo yum -y install gcc gcc-c++
-sudo yum -y install ant maven gradle
-sudo yum -y install java-1.8.0-openjdk
+sudo yum -y install mc lynx
 sudo yum -y install `sudo yum list | grep '^java-[0-9]' | sort | tail -1 | awk '{ print $1; }'`
+sudo yum -y install java-1.8.0-openjdk
+sudo yum -y install ant maven gradle
 sudo yum -y install gzip zstd bzip2 xz pigz zip unzip
 sudo yum -y install socat
 

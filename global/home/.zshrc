@@ -1,0 +1,1 @@
+.config/_global/shell/shrc_all

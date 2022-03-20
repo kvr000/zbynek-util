@@ -1,14 +1,17 @@
 #!/bin/sh
 
-main=
+globalOpt=
 if [ "x$1" = "x-C" ]; then
-	main="$main $1 $2"; shift; shift
+	globalOpt="$globalOpt $1 $2"; shift; shift
 fi
 
-date=$1; shift
-gdate=`faketime -f "$date" date`
+date="$1"; shift
+gdate="$date"
+#gdate=`faketime -f "$date" date`
 #if [ $OSTYPE = "Linux" ]; then
 #	date=`date -d "$1"`
 #fi
 msg="$1"; shift
-faketime -f "$date" git $main commit --date="$gdate" -m "$msg" "$@"
+export GIT_AUTHOR_DATE="$gdate"
+export GIT_COMMITTER_DATE="$gdate"
+git $globalOpt commit --date "$gdate"

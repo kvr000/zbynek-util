@@ -14,7 +14,7 @@ eval {
 }
 	or warn "failed to lock memory: $@";
 
-die "usage: $0 tar-archive (optionally gzip/bzip2-ed and/or gpg-ed)" unless (@ARGV >= 1 && @ARGV <= 4);
+die "usage: $0 tar-archive (optionally gzip/bzip2/xz/zstd-ed and/or gpg-ed)" unless (@ARGV >= 1 && @ARGV <= 4);
 
 my $infd;
 my $filename = shift @ARGV
@@ -57,8 +57,24 @@ elsif ($filename =~ m/^(.*)\.xz$/) {
 			or die "failed to dup to STDIN: $!";
 		open(STDOUT, ">&", $wh)
 			or die "failed to dup to STDOUT: $!";
-		exec("pixz", "-d") or exec("xz", "-d");
+		exec("xz", "-d");
 		die "failed to exec xz: $!";
+	}
+	else {
+		undef $wh;
+		$infd = $rh;
+	}
+}
+elsif ($filename =~ m/^(.*)\.zstd?$/) {
+	pipe(my $rh, my $wh)
+		or die "failed to create pipe: $!";
+	if (fork() == 0) {
+		open(STDIN, "<&", $infd)
+			or die "failed to dup to STDIN: $!";
+		open(STDOUT, ">&", $wh)
+			or die "failed to dup to STDOUT: $!";
+		exec("zstd", "-T0", "-d");
+		die "failed to exec zstd: $!";
 	}
 	else {
 		undef $wh;
@@ -122,6 +138,14 @@ else {
 			my $suffix = $2;
 			eval "use Digest::SHA3; use Text::Trim; use MIME::Base64::URLSafe; 1;" or die $@;
 			STDOUT->say(MIME::Base64::URLSafe::encode(MIME::Base64::URLSafe::decode(Digest::SHA3::sha3_384_base64(Text::Trim::trim($tar->get_content("pw/_"))."-".$suffix))));
+		}
+		elsif ($1 eq "exec") {
+			my $file = $2;
+			open(my $shell, "| $ENV{SHELL}")
+				or die "Failed to run shell: $ENV{SHELL} : $!";
+			$shell->print($tar->get_content($file));
+			close($shell);
+			print("Failed: $?\n") if ($? != 0);
 		}
 		elsif ($1 eq "x") {
 			last;

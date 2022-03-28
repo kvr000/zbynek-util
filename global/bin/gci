@@ -1,5 +1,7 @@
 #!/bin/sh
 
+set -e
+
 globalOpt=
 if [ "x$1" = "x-C" ]; then
 	globalOpt="$globalOpt $1 $2"; shift; shift
@@ -11,7 +13,6 @@ gdate="$date"
 #if [ $OSTYPE = "Linux" ]; then
 #	date=`date -d "$1"`
 #fi
-msg="$1"; shift
 export GIT_AUTHOR_DATE="$gdate"
 export GIT_COMMITTER_DATE="$gdate"
-git $globalOpt commit --date "$gdate"
+exec git $globalOpt commit --date "$gdate" "$@"

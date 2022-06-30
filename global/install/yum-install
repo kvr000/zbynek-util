@@ -16,7 +16,7 @@ sudo yum -y install vim-X11
 sudo yum -y install git cmake make
 
 # Perl general:
-sudo yum -y install cpan perl-version perl-File-Slurp perl-Scalar-List-Utils perl-IO-String perl-Tie-IxHash perl-IO-Compress perl-IO-Zlib perl-libxml-perl perl-XML-LibXML perl-JSON-PP perl-JSON-XS perl-ExtUtils-MakeMaker perl-Module-Build perl-Test-Simple perl-Test-Harness
+sudo yum -y install cpan perl-version perl-File-Slurp perl-Scalar-List-Utils perl-IO-String perl-Tie-IxHash perl-IO-Compress perl-IO-Zlib perl-libxml-perl perl-XML-LibXML perl-MIME-Base64-URLSafe perl-JSON-PP perl-JSON-XS perl-Text-Trim perl-Digest-SHA3 perl-ExtUtils-MakeMaker perl-Module-Build perl-Test-Simple perl-Test-Harness
 sudo yum -y install Perl-IO-Compress-Zstd || true
 
 sudo yum -y install cpan perl-Tie-IxHash perl-XML-LibXML perl-File-Slurp perl-TermReadKey perl-String-ShellQuote perl-version

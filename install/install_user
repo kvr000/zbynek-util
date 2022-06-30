@@ -38,7 +38,7 @@ for d in `cat $DIR/_shared`; do
 		fi
 		mkdir -p $d
 		for f in `find _user/$d/ -mindepth 1 -maxdepth 1`; do
-			ln -sf `echo $d/ | sed 's,[^/]\+/\+,../,g'`$f $d/
+			ln -sf ../$f $d/
 		done
 	)
 done

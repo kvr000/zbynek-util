@@ -4,7 +4,7 @@ set -e
 
 sudo true
 
-brew install coreutils gnupg2 jq libfaketime parallel telnet lynx htop
+brew install coreutils gnupg2 jq parallel telnet lynx htop
 #brew install gcc
 brew install mc lynx
 #brew install openjdk-8-jdk
@@ -17,10 +17,13 @@ brew install vim
 brew unlink vim
 brew install macvim
 
+brew install --build-from-source libfaketime
+
 brew install git git-lfs cmake make
 
 # Perl general:
-sudo cpan version File::Slurp Scalar::Utils List::Utils IO::String Tie::IxHash ExtUtils::MakeMaker Module::Build Test::Simple Test::Harness JSON::PP JSON::XS IO::Compress IO::Zlib xml XML::LibXML
+#sudo cpan version Scalar::Util List::Util # already part of perl
+sudo cpan File::Slurp IO::String Tie::IxHash ExtUtils::MakeMaker Module::Build Test::Simple Test::Harness MIME::Base64::URLSafe JSON::PP JSON::XS Text::Trim Digest::SHA3 IO::Compress IO::Zlib xml XML::LibXML
 sudo cpan IO::Zlib IO::Compress::Zstd
 
 sudo cpan Term::ReadKey String::ShellQuote

@@ -1,11 +1,11 @@
 [ -d /usr/bin/X11 ] && PATH=$PATH:/usr/bin/X11
-PATH=/sbin:/usr/sbin:$PATH
 case `uname -s` in
 SunOS)
 	PATH=/usr/ccs/bin:/usr/xpg4/bin:$PATH
 	;;
 esac
 PATH=/usr/local/bin:$PATH
+[ ! -x /opt/homebrew/bin/brew ] || eval "$(/opt/homebrew/bin/brew shellenv)"
 bsuff=`uname -s -m | sed 's/ /-/'`
 export PATH=$HOME/platf.$bsuff/bin:$HOME/bin:$PATH
 export PERL5LIB=$HOME/perl5

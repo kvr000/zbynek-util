@@ -10,7 +10,7 @@ brew install mc lynx
 #brew install openjdk-8-jdk
 #brew install `sudo apt list | grep '^openjdk-[^/]*-jdk/' | grep -v ,now | sort -t - --key 2 -n | tail -1 | awk '{ print $1; }'`
 brew install ant maven gradle
-brew install gzip zstd bzip2 xz pigz zip unzip
+brew install gzip zstd brotli bzip2 xz pigz zip unzip
 brew install socat
 
 brew install vim
@@ -20,6 +20,8 @@ brew install macvim
 brew install --build-from-source libfaketime
 
 brew install git git-lfs cmake make
+
+brew install imagemagick
 
 # Perl general:
 #sudo cpan version Scalar::Util List::Util # already part of perl

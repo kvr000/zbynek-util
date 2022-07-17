@@ -1,3 +1,10 @@
+# General
+/o
+
+# Java projects
 target/
 /.idea/
-/o
+
+# patch error files
+*.rej
+*.orig

@@ -36,6 +36,7 @@ endif
 
 " " " runtime information
 let &runtimepath = expand("<sfile>:h").",".&runtimepath
+let &packpath = globexfiledir . "," . &packpath
 
 " " " *options*
 " " general options

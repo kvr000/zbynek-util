@@ -12,6 +12,7 @@ brew install mc lynx
 brew install ant maven gradle
 brew install gzip zstd brotli bzip2 xz pigz zip unzip
 brew install socat
+brew install ripgrep
 
 brew install vim
 brew unlink vim
@@ -25,8 +26,8 @@ brew install imagemagick
 
 # Perl general:
 #sudo cpan version Scalar::Util List::Util # already part of perl
-sudo cpan File::Slurp IO::String Tie::IxHash ExtUtils::MakeMaker Module::Build Test::Simple Test::Harness MIME::Base64::URLSafe JSON::PP JSON::XS Text::Trim Digest::SHA3 IO::Compress IO::Zlib xml XML::LibXML
-sudo cpan IO::Zlib IO::Compress::Zstd
+sudo cpan File::Slurp IO::String Tie::IxHash ExtUtils::MakeMaker Module::Build Test::Simple Test::Harness MIME::Base64::URLSafe JSON::PP JSON::XS Text::Trim Digest::SHA3 IO::Zlib XML::LibXML
+sudo cpan IO::Zlib IO::Compress::Gzip IO::Compress::Zstd
 
 sudo cpan Term::ReadKey String::ShellQuote
 

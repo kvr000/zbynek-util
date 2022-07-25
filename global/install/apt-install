@@ -13,6 +13,7 @@ sudo apt -y install openjdk-8-jdk
 sudo apt -y install ant maven gradle
 sudo apt -y install gzip zstd brotli bzip2 xz-utils pigz zip unzip
 sudo apt -y install socat
+sudo apt -y install ripgrep
 
 sudo apt -y install vim-gtk
 
@@ -21,8 +22,8 @@ sudo apt -y install git cmake make
 sudo apt -y install imagemagick
 
 # Perl general:
-sudo apt -y install perl perl-doc libversion-perl libscalar-list-utils-perl libio-string-perl libtie-ixhash-perl libfile-slurp-perl libxml-perl libxml-libxml-perl libjson-pp-perl libjson-xs-perl libtext-trim-perl libdigest-sha3-perl libmime-base64-urlsafe-perl libio-compress-perl libcompress-raw-zlib-perl libextutils-makemaker-cpanfile-perl libmodule-build-perl libtest-simple-perl libtest-harness-perl
-sudo apt -y install libio-zlib-perl libperl-io-compress-zstd || true
+sudo apt -y install perl perl-doc libversion-perl libscalar-list-utils-perl libio-string-perl libtie-ixhash-perl libfile-slurp-perl libxml-perl libxml-libxml-perl libjson-pp-perl libjson-xs-perl libtext-trim-perl libdigest-sha3-perl libmime-base64-urlsafe-perl libio-compress-gzip-perl libcompress-raw-zlib-perl libextutils-makemaker-cpanfile-perl libmodule-build-perl libtest-simple-perl libtest-harness-perl
+sudo apt -y install libio-zlib-perl libio-compress-gzip-perl libio-compress-xz-perl libperl-io-compress-zstd || true
 
 sudo apt -y install perl libextutils-makemaker-cpanfile-perl libtie-ixhash-perl libxml-libxml-perl libfile-slurp-perl libterm-readkey-perl libstring-shellquote-perl libversion-perl
 

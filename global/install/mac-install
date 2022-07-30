@@ -12,8 +12,9 @@ brew install mc lynx
 brew install ant maven gradle
 brew install gzip zstd brotli bzip2 xz pigz zip unzip
 brew install socat
-brew install ripgrep
+brew install ripgrep ctags-exuberant
 
+brew unlink macvim
 brew install vim
 brew unlink vim
 brew install macvim

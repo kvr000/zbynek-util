@@ -26,14 +26,21 @@ done
 for d in `cat $DIR/_shared`; do
 	(
 		cd "$DEST/.config/"
-		if [ ! -d "$DEST/.config/_global/$d" ]; then
+		if [ -L "$DIR/config/$d" ]; then
+			ln -sf "`readlink $DIR/config/$d`" $d
+		elif [ ! -d "$DEST/.config/_global/$d" ]; then
 			echo "Directory does not exist: $DEST/.config/_global/$d"
 			exit 127
+		else
+			mkdir -p $d
+			for f in `find _global/$d/ -mindepth 1 -maxdepth 1`; do
+				if [ -L $f ]; then
+					ln -sf "`readlink $f`" `expr "$f" : "^_global//*\\(.*\\)$"`
+				else
+					ln -sf ../$f $d/
+				fi
+			done
 		fi
-		mkdir -p $d
-		for f in `find _global/$d/ -mindepth 1 -maxdepth 1`; do
-			ln -sf ../$f $d/
-		done
 	)
 done
 

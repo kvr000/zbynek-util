@@ -156,7 +156,9 @@ if exists("$XTITLE")
 	let &titleold=$XTITLE
 endif
 " search first in external termcaps
-set nottybuiltin
+if exists("&nottybuiltin")
+	set nottybuiltin
+endif
 " use beep instead of screen flash
 set novisualbell
 " warn when a shell command is used and buffer has been changed
@@ -174,7 +176,9 @@ set textwidth=0
 set wrapmargin=0
 " don't wrap long lines
 set nowrap
+" allow modelines on 5 lines
 set modeline
+set modelines=5
 
 " use bash completion
 set wildmode=longest,list

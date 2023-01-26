@@ -16,7 +16,7 @@ sudo apt -y install gzip zstd brotli bzip2 xz-utils pigz zip unzip
 sudo apt -y install socat
 sudo apt -y install ripgrep exuberant-ctags
 
-sudo apt -y install vim-gtk
+sudo apt -y install vim-gtk neovim neovim-qt
 
 sudo apt -y install git cmake make
 

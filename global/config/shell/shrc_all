@@ -1,6 +1,4 @@
-[ ! -f /etc/skel/.bashrc ] || . /etc/skel/.bashrc
 for s in _global _user _company _local; do
 	f="$HOME/.config/$s/shell/shrc$s"
 	[ ! -f $f ] || . $f
 done
-

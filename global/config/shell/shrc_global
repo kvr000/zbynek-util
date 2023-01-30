@@ -57,3 +57,11 @@ else
 fi
 HISTSIZE=1000
 HISTCONTROL=ignoreboth
+
+local n="`ps -p $$`"
+if [[ "$n" =~ '.*[[:<:]]zsh$' ]]; then
+	[ ! -f /opt/homebrew/share/antigen/antigen.zsh ] || source /opt/homebrew/share/antigen/antigen.zsh
+	! type antigen >/dev/null || { antigen bundle zsh-users/zsh-completions; antigen apply }
+elif [[ "$n" =~ '.*[[:<:]]zsh$' ]]; then
+	[ ! -f /etc/skel/.bashrc ] || . /etc/skel/.bashrc
+fi

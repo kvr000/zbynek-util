@@ -1,5 +1,28 @@
-alias l='ls -l'
-alias ll='ls -LlA'
+if [ -n "$ZSH_VERSION" ]; then
+	HISTFILE=~/.local/zsh_history
+	setopt appendhistory
+	: ${PS1:='%n@%m:%~$ '}
+	autoload -z edit-command-line
+	zle -N edit-command-line
+	bindkey -M vicmd v edit-command-line
+else
+	: ${PS1:='\u@\h:\w$ '}
+fi
+HISTSIZE=1000
+HISTCONTROL=ignoreboth
+
+case "`ps -p $$`" in
+*zsh)
+	[ ! -f /opt/homebrew/share/antigen/antigen.zsh ] || source /opt/homebrew/share/antigen/antigen.zsh
+	! type antigen >/dev/null || antigen bundle zsh-users/zsh-completions
+	;;
+*bash)
+	[ ! -f /etc/skel/.bashrc ] || . /etc/skel/.bashrc
+	;;
+esac
+
+alias l='ls -lC'
+alias ll='ls -LlAC'
 alias m='less'
 alias j='jobs'
 alias b='bg'
@@ -44,24 +67,3 @@ alias iks='startx --'
 alias iksa='(startx --&)>/dev/null 2>&1'
 alias se='slovnik -e'
 alias sc='slovnik -c'
-
-if [ -n "$ZSH_VERSION" ]; then
-	HISTFILE=~/.local/zsh_history
-	setopt appendhistory
-	: ${PS1:='%n@%m:%~$ '}
-	autoload -z edit-command-line
-	zle -N edit-command-line
-	bindkey -M vicmd v edit-command-line
-else
-	: ${PS1:='\u@\h:\w$ '}
-fi
-HISTSIZE=1000
-HISTCONTROL=ignoreboth
-
-local n="`ps -p $$`"
-if [[ "$n" =~ '.*[[:<:]]zsh$' ]]; then
-	[ ! -f /opt/homebrew/share/antigen/antigen.zsh ] || source /opt/homebrew/share/antigen/antigen.zsh
-	! type antigen >/dev/null || { antigen bundle zsh-users/zsh-completions; antigen apply }
-elif [[ "$n" =~ '.*[[:<:]]zsh$' ]]; then
-	[ ! -f /etc/skel/.bashrc ] || . /etc/skel/.bashrc
-fi

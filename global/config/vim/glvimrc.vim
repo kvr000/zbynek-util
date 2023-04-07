@@ -183,6 +183,10 @@ set modelines=5
 " use bash completion
 set wildmode=longest,list
 
+" " file search
+" ignore files
+set wildignore=**/node_modules/*,**/target/*,**/tmp/*,**/build/*
+
 if exists("keywordprgval")
 	let &keywordprg=keywordprgval
 else

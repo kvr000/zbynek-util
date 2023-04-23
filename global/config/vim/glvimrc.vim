@@ -378,6 +378,8 @@ inoreab Ywww <C-R>=www<CR>
 " " see `Don't inherit options' in Special-routines
 au BufNewFile,BufRead *.mi set ft=mason
 
+au FocusGained * :checktime
+
 " set local autocommands and local main-pre-autocommand
 if exists("*LIa")
 	call LIa()

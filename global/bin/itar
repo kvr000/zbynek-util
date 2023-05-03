@@ -121,9 +121,12 @@ else {
 	while (<>) {
 		next unless (m/^(\S+)\s*(.*?)\s*$/);
 		if ($1 eq "l") {
-			foreach my $f (sort({ $a cmp $b } $tar->list_files())) {
-				if (length($2)) {
-					next unless ($f =~ m/$2/);
+			my @regexps = length($2) ? split(/\s+/, $2) : ();
+			OUT: foreach my $f (sort({ $a cmp $b } $tar->list_files())) {
+				if (@regexps) {
+					for (@regexps) {
+						next OUT unless ($f =~ m/$_/);
+					}
 				}
 				printf("%s\n", $f);
 			}
@@ -131,10 +134,14 @@ else {
 		elsif ($1 eq "c") {
 			print($tar->get_content($2));
 		}
+		elsif ($1 eq "f") {
+			print("Usage: f file regexp\n"), next unless ($2 =~ m/^(\S+)\s+(.+)$/);
+			print($tar->get_content($2));
+		}
 		elsif ($1 eq "s") {
 			print("failed: $!\n") unless ($tar->extract_file($2));
 		}
-		elsif ($1 eq "g") {
+		elsif ($1 eq "k") {
 			my $suffix = $2;
 			eval "use Digest::SHA3; use Text::Trim; use MIME::Base64::URLSafe; 1;" or die $@;
 			STDOUT->say(MIME::Base64::URLSafe::encode(MIME::Base64::URLSafe::decode(Digest::SHA3::sha3_384_base64(Text::Trim::trim($tar->get_content("pw/_"))."-".$suffix))));
@@ -147,11 +154,22 @@ else {
 			close($shell);
 			print("Failed: $?\n") if ($? != 0);
 		}
-		elsif ($1 eq "x") {
+		elsif ($1 eq "q") {
 			last;
 		}
 		else {
 			print("invalid command: $1\n");
+			print(<<EOT
+Commands:
+	l [pattern...]		list files
+	c file			cat file
+	f file regexp		find in file
+	s file			save file
+	k string		generate code for string (url)
+	exec			execute as command
+	q			quit
+EOT
+);
 		}
 		print("itar\$ ");
 	}

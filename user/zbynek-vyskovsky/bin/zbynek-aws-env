@@ -1,0 +1,11 @@
+#!/bin/sh
+
+# to be sourced
+
+if [ $# -ne 1 ]; then
+	echo "Parameter required: iam user" >& 2
+	false
+else
+	export AWS_ACCESS_KEY_ID=`itar $HOME/z/pw.tar.xz.gpg pw/cloud/aws.amazon.com $1: key`
+	export AWS_SECRET_ACCESS_KEY=`itar $HOME/z/pw.tar.xz.gpg pw/cloud/aws.amazon.com $1: pass`
+fi

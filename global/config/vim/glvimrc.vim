@@ -497,7 +497,7 @@ else
 endif
 
 " " " going to run
-if has("gui_running")
+if has("gui_running") || has("nvim")
 	hi User1 guibg=black guifg=red
 	hi User2 guibg=black guifg=green
 	hi User3 guibg=black guifg=blue

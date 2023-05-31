@@ -10,15 +10,17 @@ sudo apt -y install g++
 sudo apt -y install mc lynx curl
 sudo apt -y install `sudo apt list | grep '^openjdk-[^/]*-jdk/' | sort -t - --key 2 -n | tail -1 | sed 's,/.*,,'`
 sudo apt -y install `sudo apt list | grep '^openjdk-[^/]*-source/' | sort -t - --key 2 -n | tail -1 | sed 's,/.*,,'`
-sudo apt -y install openjdk-8-jdk
+sudo apt -y install openjdk-8-jdk openjdk-17-jdk
 sudo apt -y install ant maven gradle
-sudo apt -y install gzip zstd brotli bzip2 xz-utils pigz zip unzip
-sudo apt -y install socat
+sudo apt -y install gzip zstd brotli bzip2 xz-utils pigz zip unzip unrar
+sudo apt -y install socat nmap
 sudo apt -y install ripgrep exuberant-ctags
 
 sudo apt -y install vim-gtk neovim neovim-qt
 
-sudo apt -y install git cmake make
+sudo apt -y install git git-lfs pre-commit
+
+sudo apt -y install make cmake
 
 sudo apt -y install imagemagick
 

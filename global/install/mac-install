@@ -18,7 +18,9 @@ brew install vim neovim neovim-qt
 
 brew install --build-from-source libfaketime
 
-brew install git git-lfs cmake make
+brew install git git-lfs pre-commit
+
+brew install cmake make
 
 brew install imagemagick
 

@@ -1,176 +1,211 @@
-#!/usr/bin/env perl
+#!/usr/bin/env python3
 
-use strict;
-use warnings;
+# Interactive and non-interactive utility to browse compressed and encrypted tarfiles, typically for password management.
+# Author: Zbynek Vyskovsky, kvr000@gmail.com, https://github.com/kvr000/zbynek-util/
 
-use FileHandle;
-use IO::Pipe;
-use IO::Zlib;
-use Archive::Tar;
+import sys
+import os
+import io
+import subprocess
+import re
+import tarfile
+import hashlib
+import base64
 
-eval {
-	#use Sys::Mlockall qw(:all);
-	#mlockall(MCL_FUTURE|MCL_CURRENT) == 0 or die "$!";
-}
-	or warn "failed to lock memory: $@";
+from typing import List
 
-die "usage: $0 tar-archive (optionally gzip/bzip2/xz/zstd-ed and/or gpg-ed)" unless (@ARGV >= 1 && @ARGV <= 4);
 
-my $infd;
-my $filename = shift @ARGV
-	or die "Usage: $0 tar-file [in-file [filter [key]]]";
+def decrypt_gpg(filename):
+    #gpg = gnupg.GPG()
+    pipe_read, pipe_write = os.pipe()
+    process = subprocess.Popen(['gpgphe', '-d', filename], stdout = pipe_write)
+    os.close(pipe_write)
+    return io.BytesIO(os.fdopen(pipe_read, 'rb').read())
 
-if ($filename =~ /^(.*)\.gpg/) {
-	$infd = IO::Pipe->new();
-	$infd->reader("gpgphe -d $filename");
-	$filename = $1;
-}
-else {
-	$infd = FileHandle->new($filename, "<");
-}
+def openTar(file):
+    return tarfile.open(None, 'r', fileobj = file)
 
-if ($filename =~ m/^(.*)\.(gz|tgz)$/) {
-	$infd = IO::Zlib->new($infd, "rb");
-	$filename = $1;
-}
-elsif ($filename =~ m/^(.*)\.bz2$/) {
-	pipe(my $rh, my $wh)
-		or die "failed to create pipe: $!";
-	if (fork() == 0) {
-		open(STDIN, "<&", $infd)
-			or die "failed to dup to STDIN: $!";
-		open(STDOUT, ">&", $wh)
-			or die "failed to dup to STDOUT: $!";
-		exec("bzip2", "-d");
-		die "failed to exec bzip2: $!";
-	}
-	else {
-		undef $wh;
-		$infd = $rh;
-	}
-}
-elsif ($filename =~ m/^(.*)\.xz$/) {
-	pipe(my $rh, my $wh)
-		or die "failed to create pipe: $!";
-	if (fork() == 0) {
-		open(STDIN, "<&", $infd)
-			or die "failed to dup to STDIN: $!";
-		open(STDOUT, ">&", $wh)
-			or die "failed to dup to STDOUT: $!";
-		exec("xz", "-d");
-		die "failed to exec xz: $!";
-	}
-	else {
-		undef $wh;
-		$infd = $rh;
-	}
-}
-elsif ($filename =~ m/^(.*)\.zstd?$/) {
-	pipe(my $rh, my $wh)
-		or die "failed to create pipe: $!";
-	if (fork() == 0) {
-		open(STDIN, "<&", $infd)
-			or die "failed to dup to STDIN: $!";
-		open(STDOUT, ">&", $wh)
-			or die "failed to dup to STDOUT: $!";
-		exec("zstd", "-T0", "-d");
-		die "failed to exec zstd: $!";
-	}
-	else {
-		undef $wh;
-		$infd = $rh;
-	}
-}
-my $tar = Archive::Tar->new($infd, 0);
+class Main:
+    filename: str | None = None
+    infile: str | None = None
+    filters: list[re.Pattern] | None = None
+    keys: list[str] | None = None
 
-if (@ARGV) {
-	my $in_file = shift @ARGV;
-	my $content = $tar->get_content($in_file);
-	die "file $in_file does not exist" unless (defined $content);
-	if (@ARGV) {
-		my @filters = split(/,/, shift @ARGV);
-		my $out = (grep({ my $found = 1; foreach my $filter (@filters) { $found = 0 unless (m/$filter\s+/) }; $found } split(/\n/, $content)))[0];
-		if (!$out) {
-			die "file does not contain the filtered line";
-		}
-		if (@ARGV) {
-			my @keys = split(/,/, shift @ARGV);
-			my @values;
-			foreach my $key (@keys) {
-				my $value = (split(/=/, (grep({ m/^$key=/ } split(/\s+/, $out)))[0]))[1];
-				if (!defined $value) {
-					die "key not found in the filtered line";
-				}
-				push(@values, $value);
-			}
-			print(join("\n", @values));
-		}
-		else {
-			print($out);
-		}
-	}
-	else {
-		print($content);
-	}
-}
-else {
-	foreach my $f (sort({ $a cmp $b } $tar->list_files())) {
-		printf("%s\n", $f);
-	}
-	print("itar\$ ");
-	while (<>) {
-		next unless (m/^(\S+)\s*(.*?)\s*$/);
-		if ($1 eq "l") {
-			my @regexps = length($2) ? split(/\s+/, $2) : ();
-			OUT: foreach my $f (sort({ $a cmp $b } $tar->list_files())) {
-				if (@regexps) {
-					for (@regexps) {
-						next OUT unless ($f =~ m/$_/);
-					}
-				}
-				printf("%s\n", $f);
-			}
-		}
-		elsif ($1 eq "c") {
-			print($tar->get_content($2));
-		}
-		elsif ($1 eq "f") {
-			print("Usage: f file regexp\n"), next unless ($2 =~ m/^(\S+)\s+(.+)$/);
-			print($tar->get_content($2));
-		}
-		elsif ($1 eq "s") {
-			print("failed: $!\n") unless ($tar->extract_file($2));
-		}
-		elsif ($1 eq "k") {
-			my $suffix = $2;
-			eval "use Digest::SHA3; use Text::Trim; use MIME::Base64::URLSafe; 1;" or die $@;
-			STDOUT->say(MIME::Base64::URLSafe::encode(MIME::Base64::URLSafe::decode(Digest::SHA3::sha3_384_base64(Text::Trim::trim($tar->get_content("pw/_"))."-".$suffix))));
-		}
-		elsif ($1 eq "exec") {
-			my $file = $2;
-			open(my $shell, "| $ENV{SHELL}")
-				or die "Failed to run shell: $ENV{SHELL} : $!";
-			$shell->print($tar->get_content($file));
-			close($shell);
-			print("Failed: $?\n") if ($? != 0);
-		}
-		elsif ($1 eq "q") {
-			last;
-		}
-		else {
-			print("invalid command: $1\n");
-			print(<<EOT
+
+    def run(self, args) -> int:
+        exit: int | None = self.setup(args)
+        if exit is not None:
+            return exit
+        return self.execute()
+
+
+    def setup(self, args) -> int | None:
+        if len(sys.argv) < 2 or len(sys.argv) > 5:
+            print("usage: itar tar-archive [ file filters keys ] (optionally gzip/bzip2/xz/zstd-ed and/or gpg-ed)")
+            sys.exit(1)
+
+        filename = sys.argv[1]
+        if filename.endswith('.gpg'):
+            tarFd = decrypt_gpg(filename)
+        else:
+            tarFd = open(filename)
+        self.tar = openTar(tarFd)
+
+        if len(sys.argv) > 2:
+            self.infile = sys.argv[2] if len(sys.argv) >= 3 else None
+            self.filters = [ re.compile(arg) for arg in sys.argv[3].split(',') ] if len(sys.argv) >= 4 else None
+            self.keys = sys.argv[4].split(',') if len(sys.argv) >= 5 else None
+        return None
+
+
+    def execute(self) -> int:
+        if self.infile is not None:
+            return self.executeExtract()
+        else:
+            return self.executeInteractive()
+
+
+    def executeExtract(self) -> int:
+        entry = self.tar.extractfile(self.infile)
+        content = entry.read().decode('utf-8')
+        if self.filters is None:
+            print(content)
+        else:
+            found = None
+            for line in content.splitlines():
+                if self.filters is None or all(filter.search(line) for filter in self.filters):
+                    found = line
+                    break
+            if found is None:
+                raise KeyError("File does not contain filtered line")
+            if self.keys is None:
+                print(found)
+            else:
+                pairs = dict(x.split('=', 2) for x in re.split('\s+', found))
+                for key in self.keys:
+                    if key in pairs:
+                        print(pairs[key])
+                    else:
+                        raise KeyError(f"Key not found in file: key={key}")
+        return 0
+
+
+    def executeInteractive(self) -> int:
+        self.interactiveCommand_l([])
+        while True:
+            print("itar$ ", end = "")
+            try:
+                if (line := input()) is None:
+                    break
+            except EOFError:
+                return 0
+            if (match := re.search('^(\S+)\s*(.*?)\s*$', line)) is None:
+                continue
+            commandFunction = 'interactiveCommand_' + match[1]
+            commandArgs = re.split('\s+', match[2])
+            if not hasattr(self, commandFunction):
+                self.interactive_invalidCommand(match[1])
+                continue
+            getattr(self, commandFunction)(commandArgs)
+
+
+    def interactiveCommand_l(self, args) -> None:
+        """list files"""
+        filters = list(map(re.compile, args))
+        for f in sorted(self.tar.getnames()):
+            if all(rex.search(f) for rex in filters):
+                print(f)
+
+    def interactiveCommand_s(self, args) -> None:
+        """save file to a file"""
+        if len(args) != 1:
+            print("Usage: s filename")
+            return
+        try:
+            entry = self.tar.extract(args[0])
+        except KeyError as ex:
+            print(f"Entry not found: {args[0]}\n\t{ex}")
+            return
+
+    def interactiveCommand_c(self, args) -> None:
+        """ prints file """
+        if len(args) != 1:
+            print("Usage: c filename")
+            return
+        content = self.interactive_readEntry(args[0])
+        if content is not None:
+            print(content)
+
+    def interactiveCommand_f(self, args) -> None:
+        """ finds string in file """
+        if len(args) < 2:
+            print("Usage: f filename regexp...")
+            return
+        filters: list[re.Pattern] = list(map(re.compile, args[1:]))
+        content = self.interactive_readEntry(args[0])
+        if content is not None:
+            for line in content.splitlines():
+                if all(filter.search(line) for filter in filters):
+                    print(line)
+
+    def interactiveCommand_k(self, args) -> None:
+        """ finds string in file """
+        if len(args) != 1:
+            print("Usage: k suffix")
+            return
+        salt = self.interactive_readEntry("pw/_")
+        if salt is None:
+            return
+        hasher = hashlib.sha3_384((salt + '-' + args[0]).encode('utf-8'))
+        print(base64.urlsafe_b64encode(hasher.digest()).decode('utf-8'))
+
+    def interactiveCommand_exec(self, args) -> None:
+        """ executes file """
+        if len(args) != 1:
+            print("Usage: exec file")
+            return
+        content = self.interactive_readEntry(args[0])
+        if content is None:
+            return
+        shell = subprocess.Popen(
+                [ os.environ['SHELL'] ],
+                stdin = subprocess.PIPE,
+                text = True
+        )
+        shell.stdin.write(content) # type: ignore
+        shell.stdin.close() # type: ignore
+        exit = shell.wait()
+        if exit != 0:
+            print(f"Process exited with code: exit={exit}")
+
+    def interactiveCommand_q(self, args) -> None:
+        raise SystemExit(0)
+
+    def interactive_invalidCommand(self, name) -> None:
+        print(f"""invalid command: {name}
 Commands:
 	l [pattern...]		list files
-	c file			cat file
+	c file		    	cat file
 	f file regexp		find in file
-	s file			save file
-	k string		generate code for string (url)
-	exec			execute as command
+	s file		    	save file
+	k string	    	generate code for string (url)
+	exec		    	execute as command
 	q			quit
-EOT
-);
-		}
-		print("itar\$ ");
-	}
-}
+""")
+
+    def interactive_readEntry(self, filename) -> str | None:
+        try:
+            entry = self.tar.extractfile(filename)
+            return entry.read().decode('utf-8')
+        except KeyError as ex:
+            print(f"Entry not found: {filename}\n\t{ex}")
+        except Exception as ex:
+            print(f"Error reading entry: {filename}\n\t{ex}")
+        return None
+
+    def list_files(self, filename) -> list[str]:
+        with tarfile.open(filename, 'r') as tar:
+            return sorted(tar.getnames())
+
+
+sys.exit(Main().run(sys.argv))

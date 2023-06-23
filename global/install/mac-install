@@ -14,7 +14,7 @@ brew install gzip zstd brotli bzip2 xz pigz zip unzip
 brew install socat
 brew install ripgrep ctags-exuberant
 
-brew install vim neovim neovim-qt
+brew install neovim neovim-qt
 
 brew install --build-from-source libfaketime
 

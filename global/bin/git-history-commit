@@ -1,0 +1,34 @@
+#!/bin/sh
+
+set -e
+
+if [ $# -ne 1 ]; then
+	echo "Usage: $0 commit-id" >&2
+	cat >&2 <<EOF
+Commits the current changes - INCLUDING unstaged - to selected historical commit
+EOF
+	exit 122
+fi
+commit="$1"
+
+pid=$$
+
+noabort=true
+nopop=true
+tmp_file=git-tmp-$pid
+
+trap '$noabort || ( echo Aborting; git rebase --abort ); $nopop || ( echo Popping; git stash pop; git rm -f $tmp_file )' EXIT
+
+touch $tmp_file
+git add -f $tmp_file
+git stash push
+nopop=false
+EDITOR='perl -i -pe "s/^pick /edit / if ($. == 1)"' git rebase -i "$commit~1"
+noabort=false
+git stash apply
+git rm -f $tmp_file
+git commit -a --amend --no-edit
+git rebase --continue
+git stash drop
+nopop=true
+noabort=true

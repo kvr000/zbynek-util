@@ -25,8 +25,21 @@ def decrypt_gpg(filename):
 def openTar(file):
     return tarfile.open(None, 'r', fileobj = file)
 
+def openArchive(filename):
+    if filename.endswith('.gpg'):
+        tarFd = decrypt_gpg(filename)
+    else:
+        tarFd = open(filename)
+    return openTar(tarFd)
+
+def wrapWithExternalWrite(fd, command: list[str]):
+    proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=fd)
+
+    return proc.stdin, proc
+
+
 class Main:
-    filename: str | None = None
+    archiveName: str | None = None
     infile: str | None = None
     filters: list[re.Pattern] | None = None
     keys: list[str] | None = None
@@ -42,27 +55,76 @@ class Main:
     def setup(self, args) -> int | None:
         if len(sys.argv) < 2 or len(sys.argv) > 5:
             print("usage: itar tar-archive [ file filters keys ] (optionally gzip/bzip2/xz/zstd-ed and/or gpg-ed)")
-            sys.exit(1)
+            print("decrypt/encrypt: itar {decrypt|encrypt} tar-archive (optionally gzip/bzip2/xz/zstd-ed and/or gpg-ed)")
+            sys.exit(122)
 
-        filename = sys.argv[1]
-        if filename.endswith('.gpg'):
-            tarFd = decrypt_gpg(filename)
-        else:
-            tarFd = open(filename)
-        self.tar = openTar(tarFd)
+        if sys.argv[1] == "decrypt" or sys.argv[1] == "encrypt":
+            if len(sys.argv) != 3:
+                print("decrypt/encrypt requires single argument - tar-archive")
+                sys.exit(122)
+            self.archiveName = sys.argv[2]
+            if sys.argv[1] == "decrypt":
+                self.executeFunction = self.executeDecrypt
+            else:
+                self.executeFunction = self.executeEncrypt
+            return None
+
+        self.archiveName = sys.argv[1]
+        self.tar = openArchive(self.archiveName)
 
         if len(sys.argv) > 2:
             self.infile = sys.argv[2] if len(sys.argv) >= 3 else None
             self.filters = [ re.compile(arg) for arg in sys.argv[3].split(',') ] if len(sys.argv) >= 4 else None
             self.keys = sys.argv[4].split(',') if len(sys.argv) >= 5 else None
+            self.executeFunction = self.executeExtract
+        else:
+            self.executeFunction = self.executeInteractive
         return None
 
 
     def execute(self) -> int:
-        if self.infile is not None:
-            return self.executeExtract()
-        else:
-            return self.executeInteractive()
+        self.executeFunction()
+
+
+    def executeDecrypt(self) -> int:
+        self.tar = openArchive(self.archiveName)
+        self.tar.extractall()
+        return 0
+
+
+    def executeEncrypt(self) -> int:
+        outputFd = open(self.archiveName, "wb")
+        partName = self.archiveName
+        processes = []
+        while True:
+            partName, ext = os.path.splitext(partName)
+            if ext == ".gpg":
+                outputFd, proc = wrapWithExternalWrite(outputFd, [ "gpgphe", "-e" ])
+                processes.append(proc)
+            elif ext == ".xz":
+                import lzma
+                outputFd = lzma.open(outputFd, mode="wb")
+            elif ext == ".bz2":
+                import bz2
+                outputFd = bz2.open(outputFd, mode="wb")
+            elif ext == ".gz":
+                import gzip
+                outputFd = gzip.open(outputFd, mode="wb")
+            elif ext == ".tar":
+                break
+            else:
+                raise ValueError("Expected .tar extension in archive name, got: " + partName + ext)
+
+        with tarfile.open(fileobj=outputFd, mode="w") as tar:
+            tar.add(partName)
+        outputFd.close()
+
+        for proc in processes:
+            proc.communicate()
+            if proc.returncode != 0:
+                raise ValueError("External process exited with failure: " + str(proc.returncode))
+
+        return 0
 
 
     def executeExtract(self) -> int:
@@ -202,10 +264,5 @@ Commands:
         except Exception as ex:
             print(f"Error reading entry: {filename}\n\t{ex}")
         return None
-
-    def list_files(self, filename) -> list[str]:
-        with tarfile.open(filename, 'r') as tar:
-            return sorted(tar.getnames())
-
 
 sys.exit(Main().run(sys.argv))

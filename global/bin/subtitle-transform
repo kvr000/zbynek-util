@@ -1,0 +1,343 @@
+#!/usr/bin/env python3
+
+# Utility to:
+# - Collect subtitles and add them to the original video.
+# - Convert subtitles between sub and srt formats
+#
+# Author: Zbynek Vyskovsky, kvr000@gmail.com, https://github.com/kvr000/zbynek-util/
+
+from __future__ import annotations
+from pydantic import BaseModel
+import logging
+from functools import reduce
+import re
+import os
+import errno
+import sys
+import glob
+from pathlib import Path
+import shutil
+import subprocess
+import argparse
+
+
+def silentunlink(filename: str):
+        try:
+            os.remove(filename)
+        except OSError as e:
+            if e.errno != errno.ENOENT:
+                raise
+
+
+def comma_separated_string(str: str) -> list[str]:
+    return str.split(",")
+
+
+def readTextSegments(fd: fileobj, footer):
+    pending = ""
+    while (line := fd.readline()):
+        if line.endswith("\r\n"):
+            line = line[0:len(line)-2] + line[-1:]
+        pending += line
+        if line == footer:
+            ret = pending
+            pending = ""
+            yield ret
+    return
+
+
+class VideoFrame(BaseModel):
+    id: int
+    time_us: int
+
+
+class VideoData:
+    filename: str
+
+    cached_frames_by_id: dict[int, VideoFrame] = None
+    cached_frames_by_time_us: dict[int, VideoFrame] = None
+
+    def __init__(self, filename):
+        self.filename = filename
+
+    def frames_by_time_us(self):
+        if self.cached_frames_by_time_us is None:
+            self.build_frames_index()
+        return self.cached_frames_by_time_us
+
+    def frames_by_id(self):
+        if self.cached_frames_by_id is None:
+            self.build_frames_index()
+        return self.cached_frames_by_id
+
+    def build_frames_index(self):
+        logging.info("Obtaining video frames index, it may take few minutes")
+        proc = subprocess.Popen(["ffprobe", "-threads", str(os.cpu_count()), "-select_streams", "v", "-show_frames", self.filename], stdout=subprocess.PIPE, text=True)
+        id = 0
+        self.cached_frames_by_id = dict()
+        self.cached_frames_by_time_us = dict()
+        for text in VideoData.readFrames(proc.stdout):
+            frame = VideoFrame(id=id, time_us=int(round(float(text['best_effort_timestamp_time']) * 1000000)))
+            self.cached_frames_by_id[frame.id] = frame
+            self.cached_frames_by_time_us[frame.time_us] = frame
+            id = id+1
+            if id % 10000 == 0:
+                logging.info("Obtaining video frames index, progress=%d hours=%.6f", id, frame.time_us / 3600000000)
+
+    @staticmethod
+    def readFrames(fd: fileobj):
+        for frame in readTextSegments(fd, "[/FRAME]\n"):
+            data = {}
+            for line in frame.split("\n"):
+                split = line.split("=", 2)
+                if len(split) == 2:
+                    data[split[0]] = split[1]
+            yield data
+        return
+
+
+class SubtitleEntry(BaseModel):
+    start: int
+    end: int
+    text: list[str]
+
+
+SUB_LINE_PATTERN = re.compile('^\\{(\\d+)\\}\\{(\\d+)\\}(.*)')
+
+class Subtitles:
+    filename: str
+    type: str
+    entries: list[SubtitleEntry]
+
+    def __init__(self, filename: str, type: str, entries: list[SubtitleEntry]):
+        self.filename = filename
+        self.type = type
+        self.entries = entries
+
+    @classmethod
+    def read_subtitles(cls, filename: str) -> Subtitles:
+        if filename.endswith(".sub"):
+            return cls.read_subtitles_sub(filename)
+        else:
+            raise NotImplementedError("Subtitles format not supported for reading: " + filename)
+
+    @classmethod
+    def read_subtitles_sub(cls, filename: str) -> Subtitles:
+        if not filename.endswith(".sub"):
+            raise AttributeError("Filename must end with .sub suffix, got: " + filename)
+        with open(filename, "rt", encoding='utf-8-sig') as fd:
+            entries = []
+            while (line := fd.readline()):
+                line = line.rstrip()
+                if (match := SUB_LINE_PATTERN.match(line)) is None:
+                    logging.warn("Failed to match line in subtitles: " + line)
+                else:
+                    entries.append(SubtitleEntry(start=match.group(1), end=match.group(2), text=match.group(3).split("|")))
+            return Subtitles(filename, "sub", entries)
+
+    @staticmethod
+    def us_to_srt_time(us: int) -> str:
+        second = int(us/1000000)
+        minute = int(second/60)
+        hour = int(minute/60)
+        milli = int((us - second*1000000)/1000)
+        second = second - minute*60
+        minute = minute - hour*60
+
+        return "%02d:%02d:%02d.%03d" % ( hour, minute, second, milli)
+
+
+class Command:
+    def run(self, args) -> int:
+        exit: int | None = self.setup(args)
+        if exit is not None:
+            return exit
+        return self.execute()
+
+    def setup(self, args) -> int | None:
+        return None
+
+    def execute(self) -> int:
+        return 0
+
+
+class SubtitleSubCommand(Command):
+    main: Main
+
+    def __init__(self, parent):
+        self.main = parent
+
+
+class SubtitleConvert(SubtitleSubCommand):
+    inputs: list[str] = list()
+    output: str | None = None
+
+    video_data: VideoData
+
+    def setup(self, args) -> int | None:
+        parser = argparse.ArgumentParser(prog=args[0], description="Convert subtitles")
+        parser.add_argument("-i", "--input", type=str, dest="inputs", action="append", nargs='?')
+        parser.add_argument("-o", "--output", type=str, dest="output")
+        parser.add_argument("-t", "--type", type=str, dest="type")
+        parser.add_argument("inputs", type=str, action='extend', nargs='+')
+
+        parser.parse_args(args[1:], namespace=self)
+
+        if not self.inputs:
+            print("-i input argument is mandatory", file=sys.stderr)
+            return 122
+        if self.output is None and self.type is None:
+            print("one of -o output or -t type arguments is mandatory", file=sys.stderr)
+            return 122
+
+        if self.type is None:
+            extension = Path(self.output).suffix
+            if extension == "sub":
+                self.type = "sub"
+            elif extension == "srt":
+                self.type = "srt"
+        elif self.output is None:
+            self.output = map(lambda input: Path(input).stem + "." + self.type, self.inputs)
+        elif len(self.input) > 1:
+            print("-o output must not be specified if there are multiple inputs", file=sys.stderr)
+            return 122
+
+        return None
+
+    def execute(self) -> int:
+        self.video_data = VideoData(self.main.video_input)
+        for input, output in dict(zip(self.inputs, self.output)).items():
+            subtitles = Subtitles.read_subtitles(input)
+            if subtitles.type == "srt" and self.type == "sub":
+                self.convertToSub(subtitles, input, output)
+            elif subtitles.type == "sub" and self.type == "srt":
+                self.convertSubToSrt(subtitles, input, output)
+            elif subtitles.type == self.type:
+                self.convertSame(subtitles, input, output)
+            else:
+                raise Error("Unhandled type: " + self.type)
+        return 0
+
+    def convertSubToSrt(self, subtitles, input, output) -> None:
+        frame_index = self.video_data.frames_by_id()
+
+        with open(output, "wt") as fd:
+            counter = 0
+            for entry in subtitles.entries:
+                counter = counter + 1
+                start_time = frame_index[entry.start].time_us if entry.start in frame_index else 24*60*60*1000000
+                end_time = frame_index[entry.end].time_us if entry.end in frame_index else 24*60*60*1000000
+                print("%d\n%s --> %s\n%s\n" % (
+                        counter,
+                        Subtitles.us_to_srt_time(start_time), Subtitles.us_to_srt_time(end_time),
+                        "\n".join(entry.text),
+                ), file=fd)
+
+    def convertSrtToSub(self, subtitles, input, output) -> None:
+        raise NotImplementedError("TODO")
+
+    def convertSame(self, subtitles, input, output) -> None:
+        shutil.copy(input, output)
+
+
+class SubtitleEmbedder(SubtitleSubCommand):
+    priorities: list[str] | None = list()
+
+    def __init__(self, parent):
+        self.main = parent
+
+    def setup(self, args) -> int | None:
+        parser = argparse.ArgumentParser(prog=args[0], description="Embed subtitles")
+        parser.add_argument("--prio", type=comma_separated_string, dest="priorities", metavar="language priorities, comma separated or multiple arguments", action='extend')
+
+        parser.parse_args(args[1:], namespace=self)
+
+        if self.main.video_input is None or self.main.video_output is None or self.main.video_input == self.main.video_output:
+            print("-i video_input and -o video_output must be both specified and must differ", file=sys.stderr)
+            return 122
+
+        return None
+
+
+    def execute(self) -> int:
+        prefix = Path(self.main.video_input).stem + "."
+        pattern = glob.escape(prefix) + "*.srt"
+        mapping = { x: None for x in self.priorities }
+        for file in sorted(glob.glob(pattern)):
+            mapping[Path(file).stem.removeprefix(prefix)] = file
+
+        if len(mapping) == 0:
+            print("None subtitles found matching the pattern: pattern={pattern}", file=sys.stderr)
+            return 122
+        
+        args = ["ffmpeg", "-i", self.main.video_input, ]
+        maps = ["-map", "0"]
+        meta = []
+        i = 0
+        for lang, file in mapping.items():
+            if file is None:
+                print(f"Warning: subtitle file not found: language={lang}", file=sys.stderr)
+            else:
+                print(f"Adding: language={lang} file={file}", file=sys.stderr)
+                args.extend(["-i", file])
+                maps.extend(["-map", str(i + 1)])
+                meta.extend([f"-metadata:s:s:{i}", f"language={lang}"])
+                i = i + 1
+        args.extend(maps)
+        args.extend(["-c", "copy", "-c:s", "mov_text"])
+        args.extend(meta)
+        args.append(self.main.video_output)
+
+        safe = True
+        try:
+            print(f"Executing ffmpeg: {args}", file=sys.stderr)
+            exit: int = subprocess.run(args).returncode
+            if exit != 0:
+                print(f"process exited with error: args={args} exit={exit}", file=sys.stderr)
+            #safe = False
+            #shutil.copyfile(tmp, self.main.video_input)
+            #safe = True
+        finally:
+            if safe:
+                #silentunlink(tmp)
+                pass
+
+        return exit
+
+
+class Main(Command):
+    command: str | None = None
+    video_input: str | None = None
+    video_output: str | None = None
+    subcommand: list[str] = []
+
+    def setup(self, args) -> int | None:
+        parser = argparse.ArgumentParser(prog=args[0], description="Subtitles operations")
+        parser.add_argument("--vi", "--video-input", type=str, dest="video_input")
+        parser.add_argument("--vo", "--video-output", type=str, dest="video_output")
+        parser.add_argument("subcommand", type=str, nargs=argparse.REMAINDER)
+
+        parser.parse_args(args[1:], namespace=self)
+
+        if len(self.subcommand) < 1:
+            print(f"usage: {args[0]} subcommand ...", file=sys.stderr)
+            return 122
+
+        if self.subcommand[0] == 'embed':
+            self.command = SubtitleEmbedder(self)
+        elif self.subcommand[0] == 'convert':
+            self.command = SubtitleConvert(self)
+        else:
+            print("Supported subcommands: embed convert", file=sys.stderr)
+            return 122
+
+        return self.command.run(self.subcommand)
+
+
+logging.basicConfig(
+        format='%(asctime)s %(levelname)-8s %(message)s',
+        level=logging.INFO,
+        datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+sys.exit(Main().run(sys.argv))

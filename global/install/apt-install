@@ -3,10 +3,12 @@
 set -e
 
 sudo apt -y install aptitude
-sudo apt -y install ecryptfs-utils cryptsetup
+#sudo apt -y install ecryptfs-utils
+sudo apt -y install cryptsetup
 sudo apt -y install coreutils gnupg2 jq libfaketime faketime parallel telnet lynx net-tools htop
 sudo apt -y install cpufrequtils lm-sensors linux-tools-common linux-tools-generic
 sudo apt -y install g++
+sudo apt -y install clang
 sudo apt -y install mc lynx curl
 sudo apt -y install `sudo apt list | grep '^openjdk-[^/]*-jdk/' | sort -t - --key 2 -n | tail -1 | sed 's,/.*,,'`
 sudo apt -y install `sudo apt list | grep '^openjdk-[^/]*-source/' | sort -t - --key 2 -n | tail -1 | sed 's,/.*,,'`
@@ -16,6 +18,7 @@ sudo apt -y install gzip zstd brotli bzip2 xz-utils pigz zip unzip unrar
 sudo apt -y install socat nmap
 sudo apt -y install ripgrep exuberant-ctags
 
+sudo apt -y install wl-clipboard
 sudo apt -y install neovim neovim-qt
 
 sudo apt -y install git git-lfs pre-commit

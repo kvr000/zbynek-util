@@ -4,7 +4,8 @@ set -e
 
 sudo yum -y install coreutils gnupg2 jq libfaketime parallel telnet lynx htop
 sudo yum -y install gcc gcc-c++
-sudo yum -y install mc lynx
+sudo yum -y install clang
+sudo yum -y install mc lynx curl
 sudo yum -y install `sudo yum list | grep '^java-[0-9]' | sort | tail -1 | awk '{ print $1; }'`
 sudo yum -y install java-1.8.0-openjdk
 sudo yum -y install ant maven gradle
@@ -12,11 +13,12 @@ sudo yum -y install gzip zstd brotli bzip2 xz pigz zip unzip
 sudo yum -y install socat nmap
 sudo yum -y install ripgrep ctags
 
+sudo yum -y install wl-clipboard
 sudo yum -y install neovim neovim-qt
 
 sudo yum -y install git git-lfs pre-commit
 
-sudo yum -y install cmake make
+sudo yum -y install make cmake
 
 sudo yum -y install ImageMagick
 
@@ -29,3 +31,8 @@ sudo yum -y install cpan perl-Tie-IxHash perl-XML-LibXML perl-File-Slurp perl-Te
 # Perl modules 3rd-party:
 #sudo cpan HTTP::Proxy
 #sudo cpan Compress::Zstd
+
+sudo sysctl kernel.sysrq=1
+sudo perl -i -pe 's/^#?\s*(kernel.sysrq\s*=\s*).*$/${1}1/' /etc/sysctl.conf
+sudo sysctl kernel.yama.ptrace_scope=0
+sudo perl -i -pe 's/^(\s*kernel.yama.ptrace_scope\s*=\s*).*/${1}0/' /etc/sysctl.d/10-ptrace.conf

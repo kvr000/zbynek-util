@@ -55,15 +55,15 @@ class Main:
     def setup(self, args) -> int | None:
         if len(sys.argv) < 2 or len(sys.argv) > 5:
             print("usage: itar tar-archive [ file filters keys ] (optionally gzip/bzip2/xz/zstd-ed and/or gpg-ed)")
-            print("decrypt/encrypt: itar {decrypt|encrypt} tar-archive (optionally gzip/bzip2/xz/zstd-ed and/or gpg-ed)")
+            print("decrypt/encrypt: itar {--decrypt|--encrypt} tar-archive (optionally gzip/bzip2/xz/zstd-ed and/or gpg-ed)")
             sys.exit(122)
 
-        if sys.argv[1] == "decrypt" or sys.argv[1] == "encrypt":
+        if sys.argv[1] == "--decrypt" or sys.argv[1] == "--encrypt":
             if len(sys.argv) != 3:
                 print("decrypt/encrypt requires single argument - tar-archive")
                 sys.exit(122)
             self.archiveName = sys.argv[2]
-            if sys.argv[1] == "decrypt":
+            if sys.argv[1] == "--decrypt":
                 self.executeFunction = self.executeDecrypt
             else:
                 self.executeFunction = self.executeEncrypt
@@ -143,7 +143,7 @@ class Main:
             if self.keys is None:
                 print(found)
             else:
-                pairs = dict(x.split('=', 2) for x in re.split('\s+', found))
+                pairs = dict(x.split('=', 2) for x in re.split('\\s+', found))
                 for key in self.keys:
                     if key in pairs:
                         print(pairs[key])
@@ -161,10 +161,10 @@ class Main:
                     break
             except EOFError:
                 return 0
-            if (match := re.search('^(\S+)\s*(.*?)\s*$', line)) is None:
+            if (match := re.search('^(\\S+)\\s*(.*?)\\s*$', line)) is None:
                 continue
             commandFunction = 'interactiveCommand_' + match[1]
-            commandArgs = re.split('\s+', match[2])
+            commandArgs = re.split('\\s+', match[2])
             if not hasattr(self, commandFunction):
                 self.interactive_invalidCommand(match[1])
                 continue

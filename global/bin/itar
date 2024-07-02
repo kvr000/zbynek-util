@@ -56,12 +56,12 @@ class Main:
         if len(sys.argv) < 2 or len(sys.argv) > 5:
             print("usage: itar tar-archive [ file filters keys ] (optionally gzip/bzip2/xz/zstd-ed and/or gpg-ed)")
             print("decrypt/encrypt: itar {--decrypt|--encrypt} tar-archive (optionally gzip/bzip2/xz/zstd-ed and/or gpg-ed)")
-            sys.exit(122)
+            return 122
 
         if sys.argv[1] == "--decrypt" or sys.argv[1] == "--encrypt":
             if len(sys.argv) != 3:
                 print("decrypt/encrypt requires single argument - tar-archive")
-                sys.exit(122)
+                return 122
             self.archiveName = sys.argv[2]
             if sys.argv[1] == "--decrypt":
                 self.executeFunction = self.executeDecrypt

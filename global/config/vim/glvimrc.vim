@@ -210,7 +210,7 @@ if has("gui_running")
 			let &guifont=guifontval
 		endif
 	endif
-	set guiheadroom=0
+	"set guiheadroom=0
 	if exists("guicolsval")
 		let &columns=guicolsval
 	endif

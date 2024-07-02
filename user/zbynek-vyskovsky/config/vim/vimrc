@@ -172,7 +172,7 @@ endif
 if !exists("guifontval")
 	"let guifontval='-adobe-courier-bold-r-normal-*-*-100-*-*-m-*-iso8859-2'
 	"let guifontval='FreeMono Bold 12'
-	let guifontval='Monospace Regular 11'
+	let guifontval='Monospace:h11'
 	"let guifontval='/usr/share/fonts/truetype/Courier_New_Bold.ttf 11'
 endif
 if !exists("guicolsval")

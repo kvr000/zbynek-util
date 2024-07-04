@@ -27,6 +27,9 @@ sudo apt -y install make cmake
 
 sudo apt -y install imagemagick
 
+# pdf manipulation
+sudo apt -y install texlive-extra-utils pdftk-java qpdf
+
 # Perl general:
 sudo apt -y install perl perl-doc libversion-perl libscalar-list-utils-perl libio-string-perl libtie-ixhash-perl libfile-slurp-perl libxml-perl libxml-libxml-perl libjson-pp-perl libjson-xs-perl libtext-trim-perl libdigest-sha3-perl libmime-base64-urlsafe-perl libcompress-raw-zlib-perl libextutils-makemaker-cpanfile-perl libmodule-build-perl libtest-simple-perl libtest-harness-perl
 sudo apt -y install libio-zlib-perl libio-compress-gzip-perl libio-compress-xz-perl libperl-io-compress-zstd || true

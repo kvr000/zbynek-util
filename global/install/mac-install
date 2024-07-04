@@ -24,6 +24,9 @@ brew install cmake make
 
 brew install imagemagick
 
+# pdf manipulation
+brew install pdftk-java qpdf
+
 # Perl general:
 #sudo cpan version Scalar::Util List::Util # already part of perl
 sudo cpan File::Slurp IO::String Tie::IxHash ExtUtils::MakeMaker Module::Build Test::Simple Test::Harness MIME::Base64::URLSafe JSON::PP JSON::XS Text::Trim Digest::SHA3 IO::Zlib XML::LibXML

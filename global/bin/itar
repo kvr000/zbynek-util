@@ -12,7 +12,7 @@ import tarfile
 import hashlib
 import base64
 
-from typing import List
+from typing import List, Optional
 
 
 def decrypt_gpg(filename):
@@ -39,10 +39,10 @@ def wrapWithExternalWrite(fd, command: list[str]):
 
 
 class Main:
-    archiveName: str | None = None
-    infile: str | None = None
-    filters: list[re.Pattern] | None = None
-    keys: list[str] | None = None
+    archiveName: Optional[str] = None
+    infile: Optional[str] = None
+    filters: Optional[list[re.Pattern]] = None
+    keys: Optional[list[str]] = None
 
 
     def run(self, args) -> int:
@@ -52,7 +52,7 @@ class Main:
         return self.execute()
 
 
-    def setup(self, args) -> int | None:
+    def setup(self, args) -> Optional[int]:
         if len(sys.argv) < 2 or len(sys.argv) > 5:
             print("usage: itar tar-archive [ file filters keys ] (optionally gzip/bzip2/xz/zstd-ed and/or gpg-ed)")
             print("decrypt/encrypt: itar {--decrypt|--encrypt} tar-archive (optionally gzip/bzip2/xz/zstd-ed and/or gpg-ed)")
@@ -255,7 +255,7 @@ Commands:
 	q			quit
 """)
 
-    def interactive_readEntry(self, filename) -> str | None:
+    def interactive_readEntry(self, filename) -> Optional[str]:
         try:
             entry = self.tar.extractfile(filename)
             return entry.read().decode('utf-8')

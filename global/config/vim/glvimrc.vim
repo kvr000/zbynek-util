@@ -72,7 +72,7 @@ set directory-=.
 
 " " editor options
 " delete only newlines
-set backspace=1
+set backspace=indent,eol
 " use only Ctrl-K for entering digraphs
 set nodigraph
 " set noedcompatible
@@ -232,7 +232,7 @@ if has("gui_running")
 	unlet tmp1
 else " non-gui options
 	" do not restore screen when executing external commands
-	if has("win32")
+	if has("win32") && exists("&restorescreen")
 		set norestorescreen
 	elseif has("unix")
 		set t_ti= t_te=

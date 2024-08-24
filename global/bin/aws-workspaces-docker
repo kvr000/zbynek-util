@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+
+set -eu
+
+dockerfile=$(mktemp)
+trap "rm $dockerfile" EXIT
+cat << EOF > $dockerfile
+FROM ubuntu:jammy
+
+RUN apt-get update \
+  && apt-get install -y \
+    curl \
+    gnupg2 \
+    lsb-release \
+    strace \
+  && curl -L https://workspaces-client-linux-public-key.s3-us-west-2.amazonaws.com/ADB332E7.asc | apt-key add - \
+  && echo "deb [arch=amd64] https://d3nt0h4h6pmmc4.cloudfront.net/ubuntu jammy main" | tee /etc/apt/sources.list.d/amazon-workspaces-clients.list \
+  && apt-get update \
+  && apt-get install -y \
+    libusb-1.0-0 \
+    workspacesclient \
+  && rm -rf /var/lib/apt/lists/* \
+  && apt-get autoclean \
+  && apt-get autoremove
+
+WORKDIR /root
+
+#ENTRYPOINT [ "/usr/bin/strace", "-f", "-s", "200", "/usr/bin/workspacesclient" ]
+ENTRYPOINT [ "/usr/bin/workspacesclient" ]
+EOF
+
+docker build -t aws-workspaces - < $dockerfile
+xhost +local:
+exec /usr/bin/docker run -i --rm --name aws-workspaces \
+	-v /tmp/.X11-unix:/tmp/.X11-unix \
+	-v "$HOME/.local/share/Amazon Web Services":"/$HOME/.local/share/Amazon Web Services" \
+	-v "/run":"/run" \
+	-v "/dev":"/dev" \
+	-v "/home":"/home" \
+	-e DISPLAY \
+	-e LOGNAME \
+	-e USER \
+	-e HOME \
+	-e RUST_BACKTRACE=full \
+	--device /dev/dri \
+	-e TMPDIR=/var/tmp \
+	-v /var/run/dbus/system_bus_socket:/var/run/dbus/system_bus_socket \
+	--privileged \
+	aws-workspaces

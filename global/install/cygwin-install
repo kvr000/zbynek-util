@@ -1,0 +1,70 @@
+#!/bin/sh
+
+set -e
+
+packages=`echo 				\
+bash					\
+bash-completion				\
+bc					\
+binutils				\
+bzip2					\
+brotli					\
+clang					\
+cmake					\
+cpuid					\
+coreutils				\
+curl					\
+diffutils				\
+ffmpeg					\
+file					\
+gawk					\
+gcc-core				\
+gcc-g++					\
+GeoIP					\
+GeoIP-database				\
+git					\
+gnupg2					\
+gzip					\
+ImageMagick				\
+less					\
+lynx					\
+make					\
+mc					\
+mingw64-x86_64-binutils			\
+mingw64-x86_64-gcc-core			\
+mingw64-x86_64-gcc-g++			\
+mingw64-x86_64-headers			\
+mingw64-x86_64-runtime			\
+mingw64-x86_64-windows-default-manifest	\
+mingw64-x86_64-winpthreads		\
+openssh					\
+openssl					\
+patch					\
+perl					\
+perl-Error				\
+perl-TermReadKey			\
+perl-TimeDate				\
+perl-File-Slurp				\
+perl-IO-String				\
+perl-Scalar-List-Utils			\
+perl-libxml-perl			\
+perl-JSON-PP				\
+perl-Compress-Bzip2			\
+perl-Compress-Stream-Zstd		\
+perl-IO-Compress-Zstd			\
+perl-Hash-Ordered			\
+python					\
+python3					\
+qpdf					\
+rsync					\
+socat					\
+tar					\
+vim					\
+vim-common				\
+vim-minimal				\
+xxd					\
+xz					\
+zstd					\
+ | sed -E 's/\s+/,/g'`
+
+setup-x86_64 -q -P "$packages"

@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+
+import glob
+import os
+import re
+import sys
+import subprocess
+from pathlib import Path
+from xml.etree import ElementTree
+
+def get_dependencies_gradle(project_dir: str):
+    """Parse the dependency tree output and return a list of dependencies."""
+    result = subprocess.run(
+        ['./gradlew', 'dependencies'],
+        cwd=project_dir,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+
+    if result.returncode != 0:
+        raise ValueError(f"Error running gradle dependencies: {result.stderr}")
+
+    dependencies = dict()
+    levels = []
+    for line in result.stdout.splitlines():
+        match = re.match("^((?:\\|\\s+)*)[+\\\\]---\\s*(([^:]+):([^:]+)):.*", line)
+        if match:
+            artifact = match.group(2)
+            level = len(match.group(1).split("|")) - 1
+            if level >= len(levels):
+                levels.append(None)
+            levels[level] = artifact
+            if level > 0:
+                if levels[level - 1] not in dependencies:
+                    dependencies[levels[level - 1]] = set()
+                dependencies[levels[level - 1]].add(artifact)
+
+    return dependencies
+
+def get_dependencies_maven(project_dir: str):
+    """Parse the dependency tree output and return a list of dependencies."""
+    result = subprocess.run(
+        ['mvn', 'dependency:tree'],
+        cwd=project_dir,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+
+    if result.returncode != 0:
+        raise ValueError(f"Error running gradle dependencies: {result.stderr}")
+
+    dependencies = dict()
+    levels = []
+    stage = 0
+    for line in result.stdout.splitlines():
+        if stage == 0:
+            if re.match("^\\[INFO\\] --- dependency:[^:]+:tree\\s.*$", line):
+                stage = 1
+        else:
+            if re.match("^\\[INFO\\] ----------.*", line):
+                break
+            match = re.match("^\\[INFO\\] ((?:\\|\\s+)*[+\\\\]-|)\\s*((?:[^:]+):(?:[^:]+)):.*", line)
+            if match:
+                artifact = match.group(2)
+                level = len(match.group(1).split("|"))
+                if level <= 1:
+                    level = 0 if match.group(1) == "" else 1
+                if level >= len(levels):
+                    levels.append(None)
+                levels[level] = artifact
+                if level > 0:
+                    if levels[level - 1] not in dependencies:
+                        dependencies[levels[level - 1]] = set()
+                    dependencies[levels[level - 1]].add(artifact)
+
+    return dependencies
+
+def get_dependencies(project_dir: str):
+    """Parse the dependency tree output and return a list of dependencies."""
+    if Path(project_dir + "/gradlew").is_file():
+        return get_dependencies_gradle(project_dir)
+    elif Path(project_dir + "/pom.xml").is_file():
+        return get_dependencies_maven(project_dir)
+    else:
+        raise ValueError("No project file found (gradlew or pom.xml) in: " + project_dir)
+
+def find_local_modules(map_file: str):
+    """Find local Java modules within the provided directories."""
+    local_modules = dict()
+    with open(map_file, 'r') as file:
+        for line in file.readlines():
+            if line.strip() == "":
+                continue
+            if (m := re.match("^\\s*([^=]+?)\\s*=\\s*(.*?)\\s*$", line)) is None:
+                raise ValueError("Failed to parse properties line, syntax key=value required: " + line)
+            local_modules[m.group(1)] = m.group(2)
+    return local_modules
+
+def update_module_files(idea_file_path, local_modules):
+    for iml_file_path in glob.glob(idea_file_path + "/modules/*.xml"):
+        try:
+            updated = 0
+            tree = ElementTree.parse(iml_file_path)
+            root = tree.getroot()
+
+            # Find or create the component element for module libraries
+            entries = root.findall("./component[@name='NewModuleRootManager']/orderEntry[@type='library']")
+
+            for entry in entries:
+                if entry.attrib['type'] == "library" and (m := re.match("^\\w+:\\s*(([^:]+:[^:]+):[^:]+)$", entry.attrib['name'])):
+                    module = local_modules.get(m.group(1)) or local_modules.get(m.group(2))
+                    if module:
+                        if Path(idea_file_path + "/modules/" + module + ".main.xml").is_file():
+                            module = module + ".main"
+                        elif Path(idea_file_path + "/modules/" + module + ".xml").is_file():
+                            pass
+                        else:
+                            continue
+                        del entry.attrib['name']
+                        entry.attrib['type'] = "module"
+                        entry.attrib['module-name'] = module
+                        if entry.attrib.get('scope') == 'RUNTIME':
+                            del entry.attrib['scope']
+                        updated = updated + 1
+
+            # Write the modified .iml file back to disk
+            if updated:
+                tree.write(iml_file_path, encoding='utf-8', xml_declaration=True)
+                print(f"Successfully updated {iml_file_path} with local dependencies.")
+
+        except BaseException as e:
+            raise ValueError("An error occurred while updating the .iml file: " + str(e), e)
+
+
+
+def main():
+    # Input paths
+    if len(sys.argv) != 4:
+        print("Usage: %s project-dir idea-dir modules-map" % sys.argv[0], file=sys.stderr)
+        print("Updates Intellij Idea modules/*.xml files with local modules dependencies", file=sys.stderr)
+        print("project-dir : local project directory", file=sys.stderr)
+        print("idea-dir    : Intellij Idea project configuration (typically ~/.cache/JetBrains/IntellijIdea/projects/my-project.hash/external_build_system )", file=sys.stderr)
+        print("modules-map : properties file mapping artifacts to local module name, such as com.example:my-artifact = idea-module-name", file=sys.stderr)
+        print("Note you may need to restart Intellij Idea to refresh the project files", file=sys.stderr)
+        sys.exit(122)
+
+    project_dir = sys.argv[1]
+    idea_file_path = sys.argv[2]
+    module_map = sys.argv[3]
+
+    # Parse the dependency tree to get a list of dependencies
+    #dependencies = get_dependencies(project_dir)
+
+    # Find local Java modules within the provided directories
+    local_modules = find_local_modules(module_map)
+
+    # Update the .iml file with the found local dependencies
+    update_module_files(idea_file_path, local_modules)
+
+
+if __name__ == "__main__":
+    main()

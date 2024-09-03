@@ -99,6 +99,8 @@ def find_local_modules(map_file: str):
     return local_modules
 
 def update_module_files(idea_file_path, local_modules):
+    if not Path(idea_file_path + "/modules").is_dir():
+        raise ValueError("Specified path does not contain /modules directory: " + idea_file_path)
     for iml_file_path in glob.glob(idea_file_path + "/modules/*.xml"):
         try:
             updated = 0
@@ -109,6 +111,9 @@ def update_module_files(idea_file_path, local_modules):
             entries = root.findall("./component[@name='NewModuleRootManager']/orderEntry[@type='library']")
 
             for entry in entries:
+                if entry.attrib.get('scope') == 'RUNTIME':
+                    del entry.attrib['scope']
+                    updated = updated + 1
                 if entry.attrib['type'] == "library" and (m := re.match("^\\w+:\\s*(([^:]+:[^:]+):[^:]+)$", entry.attrib['name'])):
                     module = local_modules.get(m.group(1)) or local_modules.get(m.group(2))
                     if module:
@@ -134,12 +139,11 @@ def update_module_files(idea_file_path, local_modules):
             raise ValueError("An error occurred while updating the .iml file: " + str(e), e)
 
 
-
 def main():
     # Input paths
     if len(sys.argv) != 4:
         print("Usage: %s project-dir idea-dir modules-map" % sys.argv[0], file=sys.stderr)
-        print("Updates Intellij Idea modules/*.xml files with local modules dependencies", file=sys.stderr)
+        print("Updates Intellij Idea modules/*.xml files with local modules dependencies and updates runtime to compile", file=sys.stderr)
         print("project-dir : local project directory", file=sys.stderr)
         print("idea-dir    : Intellij Idea project configuration (typically ~/.cache/JetBrains/IntellijIdea/projects/my-project.hash/external_build_system )", file=sys.stderr)
         print("modules-map : properties file mapping artifacts to local module name, such as com.example:my-artifact = idea-module-name", file=sys.stderr)

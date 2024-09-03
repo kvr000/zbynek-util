@@ -62,8 +62,10 @@ tar					\
 vim					\
 vim-common				\
 vim-minimal				\
+unzip					\
 xxd					\
 xz					\
+zip					\
 zstd					\
  | sed -E 's/\s+/,/g'`
 

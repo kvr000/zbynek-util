@@ -27,6 +27,7 @@ gnupg2					\
 gzip					\
 ImageMagick				\
 less					\
+libopenh264				\
 lynx					\
 make					\
 mc					\

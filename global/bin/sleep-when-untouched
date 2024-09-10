@@ -2,10 +2,13 @@
 
 # Suspends computer to RAM when files disappear or are untouched for more than 130 seconds
 
+import re
 import os
 import time
 import subprocess
 import sys
+import platform
+from typing import Optional
 
 
 class Main:
@@ -19,7 +22,7 @@ class Main:
         return self.execute()
 
 
-    def setup(self, args) -> int | None:
+    def setup(self, args) -> Optional[int]:
         if len(sys.argv) < 2:
             print("usage: suspend-when-untouched file...")
             return 122
@@ -41,7 +44,7 @@ class Main:
                 return
             time.sleep(sleep)
 
-    def get_latest(self) -> int | None:
+    def get_latest(self) -> Optional[int]:
         latest: int = None
         for file in self.files:
             if (mtime := self.file_last_modified(file)) is not None and (latest is None or mtime > latest):
@@ -57,7 +60,11 @@ class Main:
             return None
 
     def suspend_to_ram(self):
-        if (proc := subprocess.run(["systemctl", "suspend"])).returncode != 0:
+        if re.match(".*-Windows[A-Z]*$", platform.platform()):
+            command = ["rundll32.exe", "powrprof.dll", "SetSuspendState", "Sleep"]
+        else:
+            command = ["systemctl", "suspend"]
+        if (proc := subprocess.run(command)).returncode != 0:
             raise OSError("Failed to invoke suspend: exit=" + str(proc.returncode) + " : " + str(proc.args))
 
 

@@ -13,6 +13,7 @@ brew install ant maven gradle
 brew install gzip zstd brotli bzip2 xz pigz zip unzip
 brew install socat
 brew install ripgrep ctags-exuberant
+brew install recode
 
 brew install neovim neovim-qt
 

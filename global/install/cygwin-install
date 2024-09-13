@@ -58,6 +58,7 @@ python					\
 python3					\
 qpdf					\
 rsync					\
+recode					\
 socat					\
 tar					\
 vim					\

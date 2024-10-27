@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+
+# Log search utility, able to filter based on level, time gap between entries
+# The log file is expected to match SLF4J or similar.
+#
+# Example:
+#   zbynek-log-search -L INFO -G 120 cat my-log.log
+#       Searches log file on at least INFO level, with minimal time gap 120 s
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Iterable, Callable, Optional
+import argparse
+import re
+import sys
+
+level_mapping = {
+    "TRACE": 0,
+    "DEBUG": 1,
+    "INFO": 2,
+    "WARN": 3,
+    "ERROR": 4,
+    "FATAL": 5
+}
+
+def convertLevel(levelStr: str) -> int:
+    return level_mapping[levelStr]
+
+
+class Command:
+    def run(self, args) -> int:
+        exit: int | None = self.setup(args)
+        if exit is not None:
+            return exit
+        return self.execute()
+
+    def setup(self, args) -> int | None:
+        return None
+
+    def execute(self) -> int:
+        return 0
+
+
+class MainSubCommand(Command):
+    main: Main
+
+    def __init__(self, parent):
+        self.main = parent
+
+
+class CatCommand(MainSubCommand):
+    log_files: list[str]
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.main = parent
+        self.log_files = parent.log_files
+
+    def setup(self, args) -> Optional[int]:
+        parser = argparse.ArgumentParser(prog=args[0], description="Print log file")
+        parser.add_argument("log_files", type=str, action='extend', nargs='+')
+
+        parser.parse_args(args[1:], namespace=self)
+
+        self.main.log_files = self.log_files
+        return None
+
+    def execute(self) -> int:
+        self.main.iterateLogFiles(lambda entry: print(str(entry)))
+        return 0
+
+
+class Main(Command):
+    command: Command | None = None
+    min_level: int
+    min_gap_ms: float
+    log_files: list[str] = []
+    subargs: list[str] = []
+
+    TIME_PATTERN = re.compile(r'^(?:(\d+)|((\d+):(\d+):(\d+)(?:\.(\d+))?)|((\d{4,})-(\d+)-(\d+)T(\d+):(\d+):(\d+)(?:\.(\d+))?(Z)?))$')
+
+    def setup(self, args) -> int | None:
+        parser = argparse.ArgumentParser(prog=args[0], description="Log operations")
+        parser.add_argument("-L", type=convertLevel, dest="min_level")
+        parser.add_argument("-G", type=float, dest="min_gap_ms")
+        parser.add_argument("subargs", type=str, nargs=argparse.REMAINDER)
+
+        parser.parse_args(args[1:], namespace=self)
+
+        if len(self.subargs) < 1:
+            print(f"usage: {args[0]} subcommand ...", file=sys.stderr)
+            return 122
+
+        if self.subargs[0] == 'cat':
+            self.command = CatCommand(self)
+        else:
+            print("Supported subcommands: cat", file=sys.stderr)
+            return 122
+
+        self.subargs[0] = args[0] + " " + self.subargs[0]
+        return self.command.run(self.subargs)
+
+    def convertLogTime(self, time_match: re.Match[str]) -> float:
+        if time_match.group(1):
+            return int(time_match.group(1)) / 1000.0
+        elif time_match.group(2):
+            return int(time_match.group(3)) * 3600 + int(time_match.group(4)) * 60 + int(time_match.group(5)) * 1 + int(time_match.group(6) or "0") / 1000.0
+        elif time_match.group(7):
+            return datetime.fromisoformat(time_match.group(7).replace("Z", "+00:00")).timestamp()
+        else:
+            raise ValueError("Unexpected time match: " + str(time_match))
+
+    def readLogFile(self, filename) -> Iterable[dict[str, object]]:
+        # Regular expression to match the start of a new log entry
+        entry_pattern = re.compile(r"^(?P<time_str>\S+)\s+(?P<thread>\[\S+])\s+(?P<level>\S+)\s+(?P<clazz>\S+)\s+(?:-\s)?(?P<message>.*)")
+
+        lineno = 0
+
+        last_entry: dict[str, object] = None
+        current_entry: dict[str, object] = None
+
+        comparator = lambda entry: \
+            not (self.min_level is not None and entry['level_num'] < self.min_level) and \
+            not (self.min_gap_ms is not None and last_entry is not None and current_entry['time_sec'] - last_entry['time_sec'] < self.min_gap_ms) and \
+            True
+
+        with open(filename, "r") as file:
+            for line in file:
+                lineno += 1
+                line = line.rstrip()  # Remove any trailing newline or whitespace
+                # Check if the line matches the start of a new log entry
+                match = entry_pattern.match(line)
+                if match and (time_match := self.TIME_PATTERN.match(match.group('time_str'))):
+                    if current_entry:
+                        if comparator(current_entry):
+                            last_entry = current_entry
+                            yield current_entry
+                    # Create a new entry with level mapped to a numeric value
+                    groups: dict[str, object] = match.groupdict()
+                    current_entry: dict[str, object] = {
+                        "lineno": lineno,
+                        "prev_lineno": last_entry['lineno'] if last_entry is not None else None,
+                        "level_num": level_mapping.get(groups["level"], -1),  # Default to -1 if unknown level
+                        "time_sec": self.convertLogTime(time_match),
+                    }
+                    current_entry.update(**groups)
+                elif current_entry:
+                    # Continuation of the message in a multi-line entry
+                    current_entry["message"] += "\n" +line
+
+            # Yield the last entry if any
+            if current_entry and comparator(current_entry):
+                yield current_entry
+
+    def iterateLogFiles(self, callback: Callable[[dict[str, object]], None]) -> None:
+        for filename in self.log_files:
+            for entry in self.readLogFile(filename):
+                callback(entry)
+
+
+if __name__ == "__main__":
+    Main().run(sys.argv)

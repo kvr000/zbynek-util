@@ -26,7 +26,7 @@ brew install cmake make
 brew install imagemagick
 
 # pdf manipulation
-brew install pdftk-java qpdf
+brew install pdftk-java qpdf pdfgrep
 
 # Perl general:
 #sudo cpan version Scalar::Util List::Util # already part of perl

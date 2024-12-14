@@ -41,6 +41,7 @@ mingw64-x86_64-winpthreads		\
 openssh					\
 openssl					\
 patch					\
+pdfgrep					\
 perl					\
 perl-Error				\
 perl-TermReadKey			\

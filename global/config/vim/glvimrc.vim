@@ -435,6 +435,36 @@ endfunction
 
 command UpdateAllROs call UpdateAllROs()
 
+
+function! RunDiffIgnoreColumns(cols) abort
+    " Ensure the input is a valid number
+    if a:cols !~ '^\d\+$'
+        echoerr "Invalid number of columns: " . cols
+        return
+    endif
+
+    let cmd = "diff " . "<( cut -c " . (a:cols+1) . "- " . (v:fname_in) . " ) <( cut -c " . (a:cols+1) . "- " . (v:fname_new) . " ) > " . (v:fname_out)
+    echoerr "Executing: " . cmd
+    return system(cmd)
+endfunction
+
+function! DiffIgnoreColumns(...) abort
+    " Get the number of columns to ignore, default to 23 if not provided
+    let cols = get(a:000, 0, 23)
+
+    " Ensure the input is a valid number
+    if cols !~ '^\d\+$'
+        echoerr "Invalid number of columns: " . cols
+        return
+    endif
+
+    let &diffexpr="RunDiffIgnoreColumns(" . cols . ")"
+    diffupdate
+endfunction
+
+" Create a custom command to use the function
+command! -nargs=? DiffIgnoreColumns call DiffIgnoreColumns(<f-args>)
+
 " set mappings, abbreviations, functions etc.
 if exists("*LI9")
 	call LI9()

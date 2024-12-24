@@ -66,6 +66,7 @@ vim					\
 vim-common				\
 vim-minimal				\
 unzip					\
+xmlstarlet				\
 xxd					\
 xz					\
 zip					\

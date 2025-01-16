@@ -12,6 +12,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Iterable, Callable, Optional
 import argparse
+import io
+import json
 import re
 import sys
 
@@ -26,6 +28,65 @@ level_mapping = {
 
 def convertLevel(levelStr: str) -> int:
     return level_mapping[levelStr]
+
+
+class LogReader:
+    input: io.TextIOWrapper
+    pending = []
+    currentEntry = None
+    lastIndex = None
+    thread = None
+
+    def __init__(self, input: io.TextIOWrapper):
+        self.input = input
+
+    def context(self):
+        return {
+            'currentThread': self.thread,
+            'lineno': self.currentEntry['lineno'],
+            'thread': self.currentEntry['thread'],
+            'message': self.currentEntry['message'],
+        }
+
+    def next(self):
+        if not self.pending and self._extendPending() is None:
+            return None
+        self.currentEntry = self.pending.pop(0)
+        self.thread = self.currentEntry['thread']
+        self.lastIndex = 0
+        #print('Global: ' + str(self.currentEntry), file=sys.stderr)
+        return self.currentEntry
+
+    def nextSameThread(self):
+        if self.thread is None:
+            return self.next()
+        for i in range(0, 1000):
+            if i >= len(self.pending) and self._extendPending() is None:
+                return None
+            self.currentEntry = self.pending[i]
+            if self.currentEntry['thread'] == self.thread:
+                del self.pending[i]
+                self.lastIndex = i
+                #print('Thread: ' + str(self.currentEntry), file=sys.stderr)
+                return self.currentEntry
+        return None
+
+    def pushBack(self, entry):
+        if self.lastIndex is None:
+            raise RuntimeError("Pushing back to undefined position")
+        self.pending.insert(self.lastIndex, entry)
+        self.lastIndex = None
+
+    def _extendPending(self):
+        while True:
+            line = self.input.readline()
+            if line == "":
+                return None
+            try:
+                self.pending.append(json.loads(line))
+                return len(self.pending) - 1
+            except json.JSONDecodeError:
+                print("Error parsing JSON: " + line, file=sys.stderr)
 
 
 class Command:
@@ -67,7 +128,7 @@ class CatCommand(MainSubCommand):
         return None
 
     def execute(self) -> int:
-        self.main.iterateLogFiles(lambda wanted, entry: print(str(entry)) if wanted else None)
+        self.main.iterateLogFiles(lambda wanted, entry: print(str(json.dumps(entry))) if wanted else None)
         return 0
 
 
@@ -136,9 +197,11 @@ class Main(Command):
     def readLogFile(self, filename) -> Iterable[tuple[bool, dict[str, object]]]:
         # Regular expression to match the start of a new log entry
         entry_pattern = re.compile(r"^(?P<time_str>\S+)\s+(?P<thread>\[\S+])\s+(?P<level>\S+)\s+(?P<clazz>\S+)\s+(?:-\s)?(?P<message>.*)")
+        continuation_pattern = re.compile(r"^(?P<time_str>\S+)\s+(?P<message>.*)")
 
         lineno = 0
 
+        current_time_match = None
         last_entry: dict[str, object] = None
         current_entry: dict[str, object] = None
 
@@ -153,7 +216,7 @@ class Main(Command):
                 line = line.rstrip()  # Remove any trailing newline or whitespace
                 # Check if the line matches the start of a new log entry
                 match = entry_pattern.match(line)
-                if match and (time_match := self.TIME_PATTERN.match(match.group('time_str'))):
+                if match and (current_time_match := self.TIME_PATTERN.match(match.group('time_str'))):
                     if current_entry:
                         if comparator(current_entry):
                             last_entry = current_entry
@@ -166,16 +229,22 @@ class Main(Command):
                         "lineno": lineno,
                         "prev_lineno": last_entry['lineno'] if last_entry is not None else None,
                         "level_num": level_mapping.get(groups["level"], -1),  # Default to -1 if unknown level
-                        "time_sec": self.convertLogTime(time_match),
+                        "time_sec": self.convertLogTime(current_time_match),
                     }
                     current_entry.update(**groups)
+                elif current_entry and (match := continuation_pattern.match(line)) is not None and \
+                        (time_match := self.TIME_PATTERN.match(match.group('time_str'))) and \
+                        (time_match.group(1) == "") == (current_time_match.group(1) == "") and \
+                        (time_match.group(2) == "") == (current_time_match.group(2) == "") and \
+                        (time_match.group(7) == "") == (current_time_match.group(7) == ""):
+                    current_entry["message"] += "\n" + match.group("message")
                 elif current_entry:
                     # Continuation of the message in a multi-line entry
                     current_entry["message"] += "\n" +line
 
             # Yield the last entry if any
             if current_entry:
-                return ( comparator(current_entry), current_entry )
+                yield ( comparator(current_entry), current_entry )
 
     def iterateLogFiles(self, callback: Callable[[bool, dict[str, object]], None]) -> None:
         for filename in self.log_files:

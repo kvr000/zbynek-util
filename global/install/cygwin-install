@@ -25,6 +25,7 @@ GeoIP-database				\
 git					\
 gnupg2					\
 gzip					\
+jq					\
 ImageMagick				\
 less					\
 libopenh264				\
@@ -69,6 +70,7 @@ unzip					\
 xmlstarlet				\
 xxd					\
 xz					\
+yq					\
 zip					\
 zstd					\
  | sed -E 's/\s+/,/g'`

@@ -443,8 +443,9 @@ function! RunDiffIgnoreColumns(cols) abort
         return
     endif
 
-    let cmd = "diff " . "<( cut -c " . (a:cols+1) . "- " . (v:fname_in) . " ) <( cut -c " . (a:cols+1) . "- " . (v:fname_new) . " ) > " . (v:fname_out)
-    echoerr "Executing: " . cmd
+    "let cmd = "diff " . "<( cut -c " . (a:cols+1) . "- " . (v:fname_in) . " ) <( cut -c " . (a:cols+1) . "- " . (v:fname_new) . " ) > " . (v:fname_out)
+    "echoerr "Executing: " . cmd
+    let cmd = "_vim-diff-cut-columns " . a:cols . " " . shellescape(v:fname_in) . " " . shellescape(v:fname_new) . " " . shellescape(v:fname_out)
     return system(cmd)
 endfunction
 

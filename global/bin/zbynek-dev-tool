@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+
+# Utility to do various dev tasks:
+#
+# zbynek-dev-tool - various development manipulation utilities:
+#   spotless-to-diff: converts spotless web output to diff format
+#
+# Copyright 2024-2025 Zbynek Vyskovsky mailto:kvr000@gmail.com http://github.com/kvr000/ https://github.com/kvr000/zbynek-util https://www.linkedin.com/in/zbynek-vyskovsky/
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+
+from __future__ import annotations
+
+import logging
+import re
+import sys
+import argparse
+
+
+class Command:
+    def run(self, args) -> int:
+        exit: int | None = self.setup(args)
+        if exit is not None:
+            return exit
+        return self.execute()
+
+    def setup(self, args) -> int | None:
+        return None
+
+    def execute(self) -> int:
+        return 0
+
+
+class MainSubCommand(Command):
+    main: Main
+
+    def __init__(self, parent):
+        self.main = parent
+
+
+class SpotlessToDiffCommand(MainSubCommand):
+    inputs: list[str] = list()
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.main = parent
+
+    def setup(self, args) -> int | None:
+        parser = argparse.ArgumentParser(prog=args[0], description="Convert spotless to diff")
+
+        parser.parse_args(args[1:], namespace=self)
+
+        return None
+
+    def execute(self) -> int:
+        EMPTY_PATTERN = re.compile(r'^\s*$')
+        CHANGE_PATTERN = re.compile(r'^(\s*)(@@ .*)$')
+        FILE_PATTERN = re.compile(r'^\s+(.*\S)\s*')
+        line = None
+        while True:
+            if line is None and (line := sys.stdin.readline()) == "":
+                break
+            empty_lines = False
+            if not (fm := FILE_PATTERN.match(line)):
+                line = None
+                continue
+            if (line := sys.stdin.readline()) == "":
+                break
+            if EMPTY_PATTERN.match(line):
+                if (line := sys.stdin.readline()) == "":
+                    break
+                empty_lines = True
+            if not (cm := CHANGE_PATTERN.match(line)):
+                break
+            indent = cm.group(1)
+            file = fm.group(1)
+            print(f"diff a/{file} b/{file}")
+            print(f"--- a/{file}")
+            print(f"+++ a/{file}")
+            print(cm.group(2))
+            while True:
+                line = sys.stdin.readline()
+                if empty_lines:
+                    if not EMPTY_PATTERN.match(line):
+                        raise ValueError("Expected empty line, got: " + line)
+                    line = sys.stdin.readline()
+                if line == "":
+                    break
+                if not line.startswith(indent):
+                    if not EMPTY_PATTERN.match(line):
+                        break
+                    else:
+                        line = " "
+                else:
+                    line = line[len(indent):]
+                line = re.sub(r'(·+)', lambda m: ' ' * len(m.group(1)), line, flags=0)
+                print(line, end = "")
+
+        return 0
+
+
+class Main(Command):
+    command: Command | None = None
+    subcommand: list[str] = []
+
+    def setup(self, args) -> int | None:
+        parser = argparse.ArgumentParser(prog=args[0], description="Zbynek Dev Tool")
+        parser.add_argument("subcommand", type=str, nargs=argparse.REMAINDER)
+
+        parser.parse_args(args[1:], namespace=self)
+
+        if len(self.subcommand) < 1:
+            print(f"usage: {args[0]} subcommand ...", file=sys.stderr)
+            return 122
+
+        if self.subcommand[0] == 'spotless-to-diff':
+            self.command = SpotlessToDiffCommand(self)
+        else:
+            print("Supported subcommands: spotless-to-diff", file=sys.stderr)
+            return 122
+
+        self.subcommand[0] = args[0] + " " + self.subcommand[0]
+        return self.command.run(self.subcommand)
+
+
+if __name__ == "__main__":
+    logging.basicConfig(
+        format='%(asctime)s %(levelname)-8s %(message)s',
+        level=logging.INFO,
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+
+    sys.exit(Main().run(sys.argv))

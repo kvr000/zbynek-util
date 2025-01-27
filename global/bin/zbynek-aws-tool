@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+
+# Utility to do various dev tasks:
+#
+# zbynek-aws-tool - various AWS manipulation utilities:
+#   dynamodb convert: converts DynamoDb type based output to simple JSON
+#
+# Copyright 2024-2025 Zbynek Vyskovsky mailto:kvr000@gmail.com http://github.com/kvr000/ https://github.com/kvr000/zbynek-util https://www.linkedin.com/in/zbynek-vyskovsky/
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+
+from __future__ import annotations
+
+import logging
+import json
+import sys
+import argparse
+
+
+class Command:
+    def run(self, args) -> int:
+        exit: int | None = self.setup(args)
+        if exit is not None:
+            return exit
+        return self.execute()
+
+    def setup(self, args) -> int | None:
+        return None
+
+    def execute(self) -> int:
+        return 0
+
+
+class MainSubCommand(Command):
+    main: Main
+
+    def __init__(self, parent):
+        self.main = parent
+
+
+class DynamoDbConvertCommand(MainSubCommand):
+    inputs: list[str] = list()
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.main = parent
+
+    def setup(self, args) -> int | None:
+        parser = argparse.ArgumentParser(prog=args[0], description="Convert DynamoDb type based output to simple JSON")
+
+        parser.parse_args(args[1:], namespace=self)
+
+        return None
+
+    def execute(self) -> int:
+        dynamodb_json = json.load(sys.stdin)
+
+        if "Items" in dynamodb_json:
+            # Handle the full DynamoDB dump
+            simplified_items = [self.convert_map(item) for item in dynamodb_json["Items"]]
+            simplified_json = {"Items": simplified_items}
+        else:
+            simplified_json = self.convert_map(dynamodb_json)
+
+        json.dump(simplified_json, sys.stdout, indent=4)
+        print()
+        return 0
+
+    def convert_map(self, value: dict[str, object]) -> dict[str, object]:
+        return {k: self.convert_value(v) for k, v in value.items()}
+
+    def convert_value(self, value):
+        if isinstance(value, dict):
+            key = next(iter(value))
+            if key == "S" or key == "N":
+                return int(value[key]) if key == "N" else value[key]
+            elif key == "M":
+                return {k: self.convert_value(v) for k, v in value[key].items()}
+            elif key == "L":
+                return [self.convert_value(v) for v in value[key]]
+            elif key == "BOOL":
+                return value[key]
+            elif key == "NULL":
+                return None
+            else:
+                raise ValueError(f"Unsupported type: {key}")
+        return value  # Return the value as-is if it's not a dict.
+
+
+class DynamoDbCommand(MainSubCommand):
+    command: Command | None = None
+    subcommand: list[str] = []
+
+    def setup(self, args) -> int | None:
+        parser = argparse.ArgumentParser(prog=args[0], description="Zbynek Dev Tool")
+        parser.add_argument("subcommand", type=str, nargs=argparse.REMAINDER)
+
+        parser.parse_args(args[1:], namespace=self)
+
+        if len(self.subcommand) < 1:
+            print(f"usage: {args[0]} subcommand ...", file=sys.stderr)
+            return 122
+
+        if self.subcommand[0] == 'convert':
+            self.command = DynamoDbConvertCommand(self)
+        else:
+            print("Supported subcommands: convert", file=sys.stderr)
+            return 122
+
+        self.subcommand[0] = args[0] + " " + self.subcommand[0]
+        return self.command.run(self.subcommand)
+
+
+class Main(Command):
+    command: Command | None = None
+    subcommand: list[str] = []
+
+    def setup(self, args) -> int | None:
+        parser = argparse.ArgumentParser(prog=args[0], description="Zbynek Dev Tool")
+        parser.add_argument("subcommand", type=str, nargs=argparse.REMAINDER)
+
+        parser.parse_args(args[1:], namespace=self)
+
+        if len(self.subcommand) < 1:
+            print(f"usage: {args[0]} subcommand ...", file=sys.stderr)
+            return 122
+
+        if self.subcommand[0] == 'dynamodb':
+            self.command = DynamoDbCommand(self)
+        else:
+            print("Supported subcommands: dynamodb", file=sys.stderr)
+            return 122
+
+        self.subcommand[0] = args[0] + " " + self.subcommand[0]
+        return self.command.run(self.subcommand)
+
+
+if __name__ == "__main__":
+    logging.basicConfig(
+        format='%(asctime)s %(levelname)-8s %(message)s',
+        level=logging.INFO,
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+
+    sys.exit(Main().run(sys.argv))

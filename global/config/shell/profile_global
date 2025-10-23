@@ -16,8 +16,10 @@ unset LESS
 if which less >/dev/null 2>&1; then
 	export PAGER=less
 fi
-if which vim >/dev/null 2>&1; then
-	export EDITOR=`which nvim || which vim`
+if which nvim >/dev/null 2>&1; then
+	export EDITOR=nvim
+elif which vim >/dev/null 2>&1; then
+	export EDITOR=vim
 fi
 
 case $SHELL in

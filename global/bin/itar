@@ -140,10 +140,12 @@ class Main:
                     break
             if found is None:
                 raise KeyError("File does not contain filtered line")
+            if (match := re.search('^(\\S+)\\s*:\\s(.*?)\\s*$', found)) is None:
+                raise KeyError("Line is not in format id: param=value param=value...")
             if self.keys is None:
-                print(found)
+                print(match[2])
             else:
-                pairs = dict(x.split('=', 2) for x in re.split('\\s+', found))
+                pairs = dict(x.split('=', 2) for x in re.split('\\s+', match[2]))
                 for key in self.keys:
                     if key in pairs:
                         print(pairs[key])

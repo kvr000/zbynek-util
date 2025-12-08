@@ -25,7 +25,7 @@ def load_env_file(path: Path):
     return env
 
 
-def expand_placeholders(env: dict, base_env: dict):
+def expand_placeholders(env: dict, base_env: dict, substitutes: dict[str, str]):
     """
     Replace ${VAR} placeholders in env values using:
       - already defined env values (including earlier ones in the same file)
@@ -40,46 +40,99 @@ def expand_placeholders(env: dict, base_env: dict):
     while changed:
         changed = False
         for k, v in list(env.items()):
+            for name, replacement in substitutes.items():
+                i = 0
+                while (i := v.find(name, i)) >= 0:
+                    v = v[0:i] + replacement + v[i + len(name):]
+                    i += len(replacement)
             new_v = VAR_PATTERN.sub(replacer, v)
+            env[k] = new_v
             if new_v != v:
-                env[k] = new_v
                 changed = True
     return env
 
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: run_with_env.py [files.env ...] command [args...]")
+        print("Usage: run_with_env.py [-e env=value] [-u env] [-s direct_substitute=replacement] [files.env ...] command [args...]\n\tType -h for help", file=sys.stderr)
         sys.exit(122)
 
-    env_files = []
+    merged_env = os.environ.copy()
+
+    substitutes = {}
     cmd_start = 0
-    for i, arg in enumerate(sys.argv[1:], start=1):
-        if arg.endswith(".env"):
-            env_files.append(Path(arg))
+    i = 1
+    while i < len(sys.argv):
+        arg = sys.argv[i]
+        if arg == '-h' or arg == "--help":
+            print("Usage: run_with_env.py [-e env=value] [-u env] [-s direct_substitute=replacement] [files.env ...] command [args...]")
+            print("\t-s key=value\tDirectly substitutes text from key to value in environment files")
+            print("\t-e key=value\tSets environment variable key to value")
+            print("\t-u key\t\tUnsets environment variable key")
+            print("\tfiles.env...\tLoads and sets environment from files, replacing the substitute (direct) and environment placeholders (${key} pattern")
+            print("\t--\t\tEnd of options")
+            print("\tcommand...\tCommand to execute with its arguments")
+            sys.exit(0)
+        if arg == '-s':
+            if (i := i + 1) >= len(sys.argv):
+                print("-s requires argument: name=value", file=sys.stderr)
+                sys.exit(122)
+            declaration = sys.argv[i]
+            name, value = declaration.split("=", 1)
+            if value is None:
+                print("-s requires argument: direct_substitute=replacement", file=sys.stderr)
+                sys.exit(122)
+            substitutes[name] = value
+        elif arg == '-e':
+            if (i := i + 1) >= len(sys.argv):
+                print("-e requires argument: name=value", file=sys.stderr)
+                sys.exit(122)
+            declaration = sys.argv[i]
+            name, value = declaration.split("=", 1)
+            if value is None:
+                print("-e requires argument: name=value", file=sys.stderr)
+                sys.exit(122)
+            merged_env[name] = value
+        elif arg == '-u':
+            if (i := i + 1) >= len(sys.argv):
+                print("-u requires argument: name of environment variable", file=sys.stderr)
+                sys.exit(122)
+            del merged_env[sys.argv[i]]
+        elif arg.endswith(".env"):
+            new_env = load_env_file(Path(arg))
+            # Expand placeholders using existing and new env
+            merged_env.update(expand_placeholders(new_env, merged_env, substitutes))
         else:
+            if arg == '--':
+                i += 1
             cmd_start = i
             break
+        i += 1
 
     if not cmd_start:
         print("Error: No command specified after .env files.")
         sys.exit(122)
 
-    # Load environment variables
-    merged_env = os.environ.copy()
-    for f in env_files:
-        if f.exists():
-            new_env = load_env_file(f)
-            # Expand placeholders using existing and new env
-            merged_env.update(expand_placeholders(new_env, merged_env))
-        else:
-            print(f"Warning: Env file not found: {f}")
-
     # Remaining args form the command to run
     cmd = sys.argv[cmd_start:]
     print(f"Running: {' '.join(cmd)}")
-    result = subprocess.run(cmd, env=merged_env)
-    sys.exit(result.returncode)
+    process = subprocess.Popen(cmd, env=merged_env)
+    while True:
+        try:
+            process.wait()
+            break
+        except KeyboardInterrupt:
+            pass
+
+    code = process.returncode
+    if code < 0:
+        # Child died from a signal; re-send signal to ourselves
+        sig = -code
+        os.kill(os.getpid(), sig)
+        # If kill didn't terminate (rare), fall back to exit
+        sys.exit(128 + sig)
+    else:
+        sys.exit(code)
 
 
 if __name__ == "__main__":

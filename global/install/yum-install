@@ -23,15 +23,11 @@ sudo yum -y install make cmake
 
 sudo yum -y install ImageMagick
 
-<<<<<<< Updated upstream
 # pdf manipulation
-sudo apt -y install texlive-extra-utils pdftk-java qpdf
+sudo apt -y install texlive-extra-utils pdftk-java qpdf pdfgrep
 
 # Python general:
 sudo apt -y install python3 pydantic
-=======
-sudo yum -y install pdftk-java qpdf pdfgrep
->>>>>>> Stashed changes
 
 # Perl general:
 sudo yum -y install cpan perl-version perl-File-Slurp perl-Scalar-List-Utils perl-IO-String perl-Tie-IxHash perl-IO-Compress-Zlib perl-IO-Zlib perl-libxml-perl perl-XML-LibXML perl-MIME-Base64-URLSafe perl-JSON-PP perl-JSON-XS perl-Text-Trim perl-Digest-SHA3 perl-ExtUtils-MakeMaker perl-Module-Build perl-Test-Simple perl-Test-Harness

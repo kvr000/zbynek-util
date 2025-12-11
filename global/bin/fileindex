@@ -8,10 +8,37 @@ use Getopt::Std;
 use Digest::MD5;
 use Time::Local;
 use POSIX qw(strftime);
+use File::Copy;
 
 
 our %opts;
 
+sub calculateDigest($)
+{
+	my ( $filename ) = @_;
+
+	my $fh = FileHandle->new($_, "<:raw")
+		or die "failed to open $_: $!";
+
+	my $md5 = Digest::MD5->new();
+
+	if (0) {
+		$md5->addfile($fh);
+	}
+	else {
+		my $buf;
+		my $bufsize = 4 * 1024 * 1024;
+
+		for (;;) {
+			my $n = sysread($fh, $buf, $bufsize);
+			die "read error on $_: $!" unless defined $n;
+			last if $n == 0;
+			$md5->add($buf);
+		}
+	}
+
+	return $md5->hexdigest();
+}
 
 sub readIndex()
 {
@@ -34,17 +61,22 @@ sub formatIndexLine($)
 
 sub writeIndex(@)
 {
-	my $fd = FileHandle->new("file-new.idx", ">:raw");
+	copy("file.idx", "file-bak.idx") or die "copy file.idx to file-bak.idx failed: $!";
 
-	no locale;
-	foreach (sort( { $a->{fname} cmp $b->{fname} } @_)) {
-		$fd->print(formatIndexLine($_));
+	if (!eval {
+		my $fd = FileHandle->new("file.idx", ">:raw");
+
+		no locale;
+		foreach (sort( { $a->{fname} cmp $b->{fname} } @_)) {
+			$fd->print(formatIndexLine($_)) or die "Failed to write to index: $!";
+		}
+		$fd->close()
+			or die "failed to update index: $!";
+		1;
+	}) {
+		copy("file-bak.idx", "file.idx");
+		die $@;
 	}
-	$fd->close()
-		or die "failed to update index: $!";
-	return;
-	rename("file-new.idx", "file.idx")
-		or die "failed to rename file-new.idx to file.idx: $!";
 }
 
 sub runPrintDups()
@@ -85,10 +117,9 @@ sub runUpdateIndex()
 		else {
 			STDERR->print("reindexing $_ (size=$st[7])\n");
 			$total += $st[7];
-			my $md5 = Digest::MD5->new();
 			if (!$opts{t}) {
-				$md5->addfile(FileHandle->new($_, "<:raw") or die "failed to open $_: $!");
-				$file = { hash => $md5->hexdigest(), size => $st[7], mtime => $st[9], fname => $_ };
+				my $digest = calculateDigest($_);
+				$file = { hash => $digest, size => $st[7], mtime => $st[9], fname => $_ };
 				$fdidx->print(formatIndexLine($file));
 				$fdidx->flush();
 			}

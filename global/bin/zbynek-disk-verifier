@@ -1,0 +1,287 @@
+#!/usr/bin/env -S java --source 17
+
+/**
+ * zbynek-disk-verifier
+ *
+ * Writes bytes to file and verifies they were written correctly.
+ * Detects bad storage devices, such as ones reporting bigger size than actual.
+ */
+
+import java.io.*;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.file.*;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+
+public class ZbynekDiskVerifier {
+
+	public static final int BUFFER_SIZE = 1024*1024;
+
+	public static void main(String[] args) throws Exception {
+		if (args.length < 1 || args.length > 2) {
+			System.err.println("Usage: java zbynek-disk-verifier <filename> [max-size]");
+			System.exit(122);
+		}
+
+		Path path = Paths.get(args[0]);
+
+		try {
+			writeFile(path, args.length >= 2 ? parseByteSize(args[1]) : Long.MAX_VALUE);
+			int exit = verifyFile(path);
+			if (exit == 0) {
+				Files.delete(path);
+			}
+			System.exit(exit);
+		} catch (Throwable e) {
+			System.err.println("I/O error:");
+			e.printStackTrace(System.err);
+			System.exit(127);
+		}
+	}
+
+	private static void writeFile(Path filename, long maxSize) throws Exception {
+		try (FileChannel channel = FileChannel.open(filename,
+					StandardOpenOption.CREATE,
+					StandardOpenOption.WRITE,
+					StandardOpenOption.TRUNCATE_EXISTING)) {
+
+			ByteBuffer current = ByteBuffer.allocateDirect(BUFFER_SIZE);
+			ByteBuffer next = ByteBuffer.allocateDirect(BUFFER_SIZE);
+
+			long start = System.currentTimeMillis();
+			AtomicLong progress = new AtomicLong();
+
+			long counter = 0;
+			counter = fillBuffer(current, counter);
+
+			for (;;) {
+				ByteBuffer writing = current;
+				if (progress.get() + writing.remaining() > maxSize) {
+					writing.limit((int) (maxSize - progress.get()));
+				}
+				// Start writing current buffer
+				CompletableFuture<Void> writeFuture = CompletableFuture.runAsync(() -> {
+					try {
+						while (writing.hasRemaining()) {
+							if (progress.addAndGet(channel.write(writing))%(128*1024*1024) == 0) {
+								System.out.printf("Writing: %.3f GB %.3f s\n", (double) progress.get() / (1024*1024*1024), (System.currentTimeMillis() - start) / 1000.0);
+							}
+						}
+					}
+					catch (IOException ex) {
+						throw new CompletionException(ex);
+					}
+				});
+
+				// Prepare next buffer while current is writing
+				counter = fillBuffer(next, counter);
+
+				try {
+					writeFuture.join(); // Wait for write to finish
+				} catch (CompletionException ce) {
+					Throwable ex = ce.getCause();
+					if (isOutOfSpace(ex)) {
+						System.out.println("Disk full, stopping writes.");
+						return;
+					}
+					throw ex instanceof IOException ? (IOException) ex : ce;
+				}
+
+				if (progress.get() >= maxSize) {
+					return;
+				}
+
+				// Swap buffers
+				ByteBuffer tmp = current;
+				current = next;
+				next = tmp;
+			}
+		}
+	}
+
+	private static long fillBuffer(ByteBuffer buffer, long startValue) {
+		buffer.clear();
+
+		long v = startValue;
+		while (buffer.remaining() >= Long.BYTES) {
+			buffer.putLong(v++);
+		}
+		buffer.flip();
+
+		return v;
+	}
+
+	private static int verifyFile(Path path) throws IOException {
+		try (FileChannel fc = FileChannel.open(path, StandardOpenOption.READ)) {
+
+			ByteBuffer current = ByteBuffer.allocateDirect(BUFFER_SIZE / Long.BYTES * Long.BYTES);
+			ByteBuffer next = ByteBuffer.allocateDirect(BUFFER_SIZE / Long.BYTES * Long.BYTES);
+
+			long start = System.currentTimeMillis();
+			long progress = 0;
+			long counter = 0;
+
+			// Initial synchronous read to prime the loop
+			current.clear();
+			int n = fc.read(current);
+			if (n <= 0) {
+				System.out.println("Verification completed successfully.");
+				return 0;
+			}
+			current.flip();
+
+			for (;;) {
+				// ------------ Start async read of next buffer ------------
+				next.clear();
+				ByteBuffer reading = next;
+				CompletableFuture<Integer> readFuture = CompletableFuture.supplyAsync(() -> {
+					try {
+						return fc.read(reading);
+					} catch (IOException ex) {
+						throw new CompletionException(ex);
+					}
+				});
+
+				// ------------ Verify current buffer while reading next ------------
+				while (current.remaining() >= Long.BYTES) {
+					long v = current.getLong();
+					if (v != counter) {
+						System.err.println("Mismatch at position " + (counter * Long.BYTES)
+								+ ": expected=" + counter + " found=" + v);
+						return 1;
+					}
+					++counter;
+				}
+				progress += current.limit();
+
+				if (progress % (128L * 1024 * 1024) == 0) {
+					System.out.printf("Verifying: %.3f GB %.3f s\n",
+							(double) progress / (1024 * 1024 * 1024),
+							(System.currentTimeMillis() - start) / 1000.0);
+				}
+
+				// ------------ Wait for next buffer to finish reading ------------
+				int readBytes;
+				try {
+					readBytes = readFuture.join();
+				}
+				catch (CompletionException ce) {
+					Throwable ex = ce.getCause();
+					if (ex instanceof IOException) throw (IOException) ex;
+					throw ce;
+				}
+
+				if (readBytes <= 0) {
+					System.out.println("Verification completed successfully.");
+					return 0;
+				}
+
+				next.flip();
+
+				// ------------ Swap current ↔ next ------------
+				ByteBuffer tmp = current;
+				current = next;
+				next = tmp;
+			}
+		}
+	}
+
+	private static boolean isOutOfSpace(Throwable e) {
+		String msg = e.getMessage();
+		if (msg == null) {
+			return false;
+		}
+
+		msg = msg.toLowerCase();
+
+		// Linux / Unix / macOS / BSD
+		// Typical: "No space left on device"
+		// Sometimes: "ENOSPC" or "enospc"
+		if (msg.contains("no space"))
+			return true;
+		if (msg.contains("enospc"))
+			return true;
+
+		// Windows (NTFS / FAT / ReFS)
+		// Typical: "There is not enough space on the disk"
+		if (msg.contains("not enough space"))
+			return true;
+
+		return false;
+	}
+
+	public static long parseByteSize(String text) {
+		if (text == null) {
+			throw new IllegalArgumentException("Null size string");
+		}
+
+		String s = text.trim().replace("_", "").toUpperCase();
+
+		// Extract numeric part
+		int i = 0;
+		while (i < s.length() && (Character.isDigit(s.charAt(i)) || s.charAt(i) == '.')) {
+			i++;
+		}
+		if (i == 0) {
+			throw new IllegalArgumentException("Invalid size: " + text);
+		}
+
+		double number = Double.parseDouble(s.substring(0, i));
+		String unit = s.substring(i).trim();
+
+		long multiplier;
+
+		switch (unit) {
+			case "":
+			case "B":
+				multiplier = 1;
+				break;
+
+			case "KB":
+				multiplier = 1000L;
+				break;
+			case "K":
+			case "KIB":
+				multiplier = 1024L;
+				break;
+
+			case "MB":
+				multiplier = 1000L * 1000;
+				break;
+			case "M":
+			case "MIB":
+				multiplier = 1024L * 1024;
+				break;
+
+			case "GB":
+				multiplier = 1000L * 1000 * 1000;
+				break;
+			case "G":
+			case "GIB":
+				multiplier = 1024L * 1024 * 1024;
+				break;
+
+			case "TB":
+				multiplier = 1000L * 1000 * 1000 * 1000;
+				break;
+			case "T":
+			case "TIB":
+				multiplier = 1024L * 1024 * 1024 * 1024;
+				break;
+
+			default:
+				throw new IllegalArgumentException("Unknown unit: " + unit);
+		}
+
+		double result = number * multiplier;
+
+		if (result > Long.MAX_VALUE) {
+			throw new IllegalArgumentException("Byte size too large: " + text);
+		}
+
+		return (long) result;
+	}
+
+}

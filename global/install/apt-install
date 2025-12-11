@@ -29,14 +29,10 @@ sudo apt -y install make cmake
 sudo apt -y install imagemagick
 
 # pdf manipulation
-<<<<<<< Updated upstream
-sudo apt -y install pdftk-java qpdf
+sudo apt -y install texlive-extra-utils pdftk-java qpdf pdfgrep
 
 # Python general:
 sudo apt -y install python3 pydantic
-=======
-sudo apt -y install texlive-extra-utils pdftk-java qpdf pdfgrep
->>>>>>> Stashed changes
 
 # Perl general:
 sudo apt -y install perl perl-doc libversion-perl libscalar-list-utils-perl libio-string-perl libtie-ixhash-perl libfile-slurp-perl libxml-perl libxml-libxml-perl libjson-pp-perl libjson-xs-perl libtext-trim-perl libdigest-sha3-perl libmime-base64-urlsafe-perl libcompress-raw-zlib-perl libextutils-makemaker-cpanfile-perl libmodule-build-perl libtest-simple-perl libtest-harness-perl

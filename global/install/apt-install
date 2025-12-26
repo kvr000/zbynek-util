@@ -1,6 +1,7 @@
 #!/bin/sh
 
 set -e
+set -o pipefail
 
 sudo apt -y install aptitude
 #sudo apt -y install ecryptfs-utils
@@ -10,8 +11,8 @@ sudo apt -y install cpufrequtils lm-sensors linux-tools-common linux-tools-gener
 sudo apt -y install g++
 sudo apt -y install clang
 sudo apt -y install mc lynx curl
-sudo apt -y install `sudo apt list | grep '^openjdk-[^/]*-jdk/' | sort -t - --key 2 -n | tail -1 | sed 's,/.*,,'`
-sudo apt -y install `sudo apt list | grep '^openjdk-[^/]*-source/' | sort -t - --key 2 -n | tail -1 | sed 's,/.*,,'`
+sudo apt -y install `sudo apt list | grep '^openjdk-[^/]*-jdk/' | sort -t - --key 2 -n | grep -E -- '-(17|21)-' | tail -1 | sed 's,/.*,,'`
+sudo apt -y install `sudo apt list | grep '^openjdk-[^/]*-source/' | sort -t - --key 2 -n | grep -E -- '-(17|21)-' | tail -1 | sed 's,/.*,,'`
 sudo apt -y install openjdk-8-jdk openjdk-17-jdk
 sudo apt -y install ant maven gradle
 sudo apt -y install gzip zstd brotli bzip2 xz-utils pigz zip unzip unrar
@@ -32,10 +33,10 @@ sudo apt -y install imagemagick
 sudo apt -y install texlive-extra-utils pdftk-java qpdf pdfgrep
 
 # Python general:
-sudo apt -y install python3 pydantic
+sudo apt -y install python3 python3-pydantic
 
 # Perl general:
-sudo apt -y install perl perl-doc libversion-perl libscalar-list-utils-perl libio-string-perl libtie-ixhash-perl libfile-slurp-perl libxml-perl libxml-libxml-perl libjson-pp-perl libjson-xs-perl libtext-trim-perl libdigest-sha3-perl libmime-base64-urlsafe-perl libcompress-raw-zlib-perl libextutils-makemaker-cpanfile-perl libmodule-build-perl libtest-simple-perl libtest-harness-perl
+sudo apt -y install perl perl-doc libversion-perl libscalar-list-utils-perl libio-string-perl libtie-ixhash-perl libfile-slurp-perl libxml-perl libxml-libxml-perl libjson-pp-perl libjson-xs-perl libtext-trim-perl libmime-base64-urlsafe-perl libcompress-raw-zlib-perl libextutils-makemaker-cpanfile-perl libmodule-build-perl libtest-simple-perl libtest-harness-perl #libdigest-sha3-perl
 sudo apt -y install libio-zlib-perl libio-compress-gzip-perl libio-compress-xz-perl libperl-io-compress-zstd || true
 
 sudo apt -y install perl libextutils-makemaker-cpanfile-perl libtie-ixhash-perl libxml-libxml-perl libfile-slurp-perl libterm-readkey-perl libstring-shellquote-perl libversion-perl
@@ -44,11 +45,14 @@ sudo apt -y install perl libextutils-makemaker-cpanfile-perl libtie-ixhash-perl 
 #sudo cpan HTTP::Proxy
 #sudo cpan Compress::Zstd
 
+# Media:
+sudo apt install mpv
+
 sudo sysctl kernel.sysrq=1
 sudo perl -i -pe 's/^#?\s*(kernel.sysrq\s*=\s*).*$/${1}1/' /etc/sysctl.conf
 sudo sysctl kernel.yama.ptrace_scope=0
-sudo perl -i -pe 's/^(\s*kernel.yama.ptrace_scope\s*=\s*).*/${1}0/' /etc/sysctl.d/10-ptrace.conf
+sudo perl -i -pe 's/^(\s*kernel.yama.ptrace_scope\s*=\s*).*/${1}0/' /etc/sysctl.d/10-ptrace.conf || true
 
-sudo perl -i -pe 's/^(\s*<policy domain="resource" name="disk" value=)"[^"]+"(\/>)/$1"8GiB"$2/' /etc/ImageMagick-6/policy.xml
-sudo perl -i -pe 's/^(\s*)(<policy domain="coder" rights="none" pattern="PDF" \/>.*)/$1<!-- $2 -->/' /etc/ImageMagick-6/policy.xml
+sudo perl -i -pe 's/^(\s*<policy domain="resource" name="disk" value=)"[^"]+"(\/>)/$1"8GiB"$2/' /etc/ImageMagick-7/policy.xml
+sudo perl -i -pe 's/^(\s*)(<policy domain="coder" rights="none" pattern="PDF" \/>.*)/$1<!-- $2 -->/' /etc/ImageMagick-7/policy.xml
 

@@ -2,5 +2,37 @@
 
 set -e
 
-git config user.email "kvr000@gmail.com"
-git config user.name "Zbynek Vyskovsky"
+if [ $# -eq 0 ]; then
+	user=zbynek
+elif [ $# -eq 1 -a "x$1" != "xhelp" ]; then
+	user="$1"
+	shift
+else
+	echo "Usage: $0 {zbynek|vitek,premysl|zofie}" >&2
+	exit 122
+fi
+
+case "$user" in
+	zbynek)
+		name="Zbynek Vyskovsky"
+		email="kvr000@gmail.com"
+		;;
+	vitek)
+		name="Vitek Vyskovsky"
+		email="kvr000+vitek@gmail.com"
+		;;
+	premysl)
+		name="Premysl Vyskovsky"
+		email="kvr000+premysl@gmail.com"
+		;;
+	zofie)
+		name="Zofie Vyskovska"
+		email="kvr000+zofie@gmail.com"
+		;;
+	*)
+		echo "Type: $0 help" >&2
+		;;
+esac
+
+git config user.email "$email"
+git config user.name "$name"

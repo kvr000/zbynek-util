@@ -28,6 +28,7 @@ gzip					\
 jq					\
 ImageMagick				\
 less					\
+lesspipe				\
 libopenh264				\
 lynx					\
 make					\

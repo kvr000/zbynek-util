@@ -16,6 +16,7 @@ sudo apt -y install `sudo apt list | grep '^openjdk-[^/]*-source/' | sort -t - -
 sudo apt -y install openjdk-8-jdk openjdk-17-jdk
 sudo apt -y install ant maven gradle
 sudo apt -y install gzip zstd brotli bzip2 xz-utils pigz zip unzip unrar
+sudo apt -y install less lesspipe
 sudo apt -y install socat nmap
 sudo apt -y install ripgrep exuberant-ctags
 sudo apt -y install recode

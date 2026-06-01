@@ -4,7 +4,9 @@
 # Java projects
 target/
 /.idea/
+*.code-workspace
 
 # patch error files
 *.rej
 *.orig
+

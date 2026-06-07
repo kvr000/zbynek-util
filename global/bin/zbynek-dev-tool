@@ -51,8 +51,6 @@ class MainSubCommand(Command):
 
 
 class SpotlessToDiffCommand(MainSubCommand):
-    inputs: list[str] = list()
-
     def __init__(self, parent):
         super().__init__(parent)
         self.main = parent
@@ -111,6 +109,45 @@ class SpotlessToDiffCommand(MainSubCommand):
         return 0
 
 
+class LogToTimestamp(MainSubCommand):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.main = parent
+
+    def setup(self, args) -> int | None:
+        parser = argparse.ArgumentParser(prog=args[0], description="Convert log CSV epoch timestamps to UTC")
+        parser.parse_args(args[1:], namespace=self)
+        return None
+
+    def execute(self) -> int:
+        import csv
+        from datetime import datetime, timezone
+
+        reader = csv.reader(sys.stdin)
+        for i, row in enumerate(reader):
+            if not row:
+                continue
+            if i == 0 and row[0].strip().lower() == "timestamp":
+                continue
+            try:
+                ts_ms = int(row[0])
+                row[0] = (
+                        datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+                        .strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+                )
+            except ValueError:
+                pass
+            message = row[1] if len(row) > 1 else ""
+            lines = message.splitlines()
+            first = lines[0] if lines else ""
+            rest = lines[1:]
+            sys.stdout.write(f"{row[0]} {first}\n")
+            for line in rest:
+                sys.stdout.write(f"\t{line}\n")
+
+        return 0
+
+
 class Main(Command):
     command: Command | None = None
     subcommand: list[str] = []
@@ -127,6 +164,8 @@ class Main(Command):
 
         if self.subcommand[0] == 'spotless-to-diff':
             self.command = SpotlessToDiffCommand(self)
+        if self.subcommand[0] == 'log-to-timestamp':
+            self.command = LogToTimestamp(self)
         else:
             print("Supported subcommands: spotless-to-diff", file=sys.stderr)
             return 122

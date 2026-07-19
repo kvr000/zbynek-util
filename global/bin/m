@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+
+# m: pick a "less"-family pager based on compression extension.
+#
+# - Files with no recognized compression extension are assumed to be plain,
+#   viewable files (compatible with any pager).
+# - Mixing one compression extension with plain files is fine, since e.g.
+#   zless can view both .gz and plain files.
+# - Mixing two *different* compression extensions (e.g. .gz and .bz2) is
+#   inconsistent and refused.
+#
+# Usage: m FILE [FILE...]
+
+set -euo pipefail
+
+# Map a compression extension to its pager. Empty output = not a
+# recognized compression extension (treated as plain/viewable).
+compression_pager_for_ext() {
+    case "$1" in
+        gz)        echo "zless" ;;
+        bz2|bz)    echo "bzless" ;;
+        xz)        echo "xzless" ;;
+        Z)         echo "zless" ;;
+        zst|zstd)  echo "zstdless" ;;
+        *)         echo "" ;;
+    esac
+}
+
+get_ext() {
+    local base="${1##*/}"
+    if [[ "$base" == *.* && "$base" != .* ]]; then
+        echo "${base##*.}"
+    else
+        echo ""
+    fi
+}
+
+pager=""
+pager_ext=""
+for f in "$@"; do
+    e="$(get_ext "$f")"
+    p="$(compression_pager_for_ext "$e")"
+    [ -z "$p" ] && continue   # plain file, no constraint
+
+    if [ -z "$pager" ]; then
+        pager="$p"
+        pager_ext="$e"
+    elif [ "$p" != "$pager" ]; then
+        echo "smartless: inconsistent compression extensions ('.$pager_ext' vs '.$e' for '$f') - refusing to guess" >&2
+        exit 127
+    fi
+done
+
+# No compression extension found among the files -> plain viewer.
+pager="${pager:-less}"
+
+if ! command -v "$pager" >/dev/null 2>&1; then
+    echo "smartless: pager '$pager' not found for extension '.$pager_ext'" >&2
+    exit 127
+fi
+
+exec "$pager" -- "$@"

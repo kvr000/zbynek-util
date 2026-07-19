@@ -23,7 +23,6 @@ esac
 
 alias l='ls -lC'
 alias ll='ls -LlAC'
-alias m='less'
 alias j='jobs'
 alias b='bg'
 alias f='fg'

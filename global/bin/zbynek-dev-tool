@@ -164,7 +164,7 @@ class Main(Command):
 
         if self.subcommand[0] == 'spotless-to-diff':
             self.command = SpotlessToDiffCommand(self)
-        if self.subcommand[0] == 'log-to-timestamp':
+        elif self.subcommand[0] == 'log-to-timestamp':
             self.command = LogToTimestamp(self)
         else:
             print("Supported subcommands: spotless-to-diff", file=sys.stderr)

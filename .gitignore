@@ -1,1 +1,4 @@
 /bin/rb-proxy.pl
+
+/global/bin/__pycache__/
+/user/*/bin/__pycache__/

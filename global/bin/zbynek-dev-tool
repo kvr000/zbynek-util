@@ -5,6 +5,7 @@
 # zbynek-dev-tool - various development manipulation utilities:
 #   spotless-to-diff: converts spotless web output to diff format
 #   git-revert-mod: reverts unintended file mode (executable bit) changes from recent commits
+#   git-prune-merged: deletes local branches already merged into the given branches
 #
 # Copyright 2024-2025 Zbynek Vyskovsky mailto:kvr000@gmail.com http://github.com/kvr000/ https://github.com/kvr000/zbynek-util https://www.linkedin.com/in/zbynek-vyskovsky/
 #
@@ -287,6 +288,56 @@ class Git:
     def reset_hard(self, sha: str) -> None:
         self.run(["reset", "--hard", sha])
 
+    def merged_branches(self, ref: str) -> list[str]:
+        output = self.output(["branch", "--format=%(refname:short)", "--merged", ref])
+        return [line.strip() for line in output.splitlines() if line.strip()]
+
+    def list_local_branches(self) -> list[str]:
+        output = self.output(["for-each-ref", "--format=%(refname:short)", "refs/heads/"])
+        return [line.strip() for line in output.splitlines() if line.strip()]
+
+    def merge_base(self, a: str, b: str) -> str | None:
+        result = self.run(["merge-base", a, b], check=False)
+        return result.stdout.strip() if result.returncode == 0 else None
+
+    def changed_paths(self, base: str, rev: str) -> list[str]:
+        output = self.output(["diff", "--name-only", base, rev])
+        return [line.strip() for line in output.splitlines() if line.strip()]
+
+    def is_squash_merged(self, branch: str, target: str) -> bool:
+        """
+        Content-based merge test, for branches squashed into a single commit on their way into
+        the target (so they are not an ancestor of it, and "git branch --merged" misses them).
+
+        Finds every path the branch touched since it diverged from the target (base = their
+        merge-base), then checks whether the target's current version of exactly those paths is
+        byte-identical to the branch tip's version. If so, whatever the branch introduced is
+        still present in the target verbatim, however many commits or however it was squashed;
+        this deliberately does not try to match the branch to a specific commit in target.
+
+        A branch that made no changes relative to the merge-base (i.e. is itself an ancestor)
+        is reported as not squash-merged here since "git branch --merged" already covers that
+        case; a branch whose files were touched again independently in the target after the
+        merge (so they no longer match byte-for-byte) is also reported as not merged, since it
+        is no longer clear that all of the branch's content is still present.
+        """
+        base = self.merge_base(branch, target)
+        if base is None:
+            return False
+        paths = self.changed_paths(base, branch)
+        if not paths:
+            return False
+        result = self.run(["diff", "--quiet", target, branch, "--"] + paths, check=False)
+        return result.returncode == 0
+
+    def delete_branch(self, name: str) -> None:
+        # "-D" rather than "-d": we already verified the branch is merged (via --merged against
+        # the requested target), so we don't need git's own re-check here -- which is just as
+        # well, since "-d" additionally insists the branch be merged into its configured
+        # @{upstream} (e.g. refs/remotes/origin/<branch>), and refuses otherwise even when it is
+        # merged into HEAD/the target, which is overly strict for what this command is doing.
+        self.run(["branch", "-D", name])
+
 
 class GitRevertModCommand(MainSubCommand):
     """
@@ -426,6 +477,106 @@ class GitRevertModCommand(MainSubCommand):
         return 0
 
 
+class GitPruneMergedCommand(MainSubCommand):
+    """
+    Deletes local branches that have already been merged into any of the given target branches.
+
+    For each target branch, runs "git branch --merged <branch>" to find the branches fully
+    merged into it, takes the union across all targets, and deletes the result via
+    "git branch -D". A plain "-d" is not used because it additionally requires the branch to be
+    merged into its configured @{upstream}, which can reject a branch we already confirmed is
+    merged into the target (e.g. a stale or squash-merged remote-tracking ref); the "--merged"
+    check above is this command's own safety check instead. The target branches themselves and
+    the current branch are always excluded from deletion, even if they would otherwise show up
+    as merged (e.g. a target merged into another target).
+
+    With --squash-merged, also considers every other local branch: a branch is often rebuilt
+    from many small commits while it lands in the target as one squashed commit, so it is never
+    an ancestor of the target and "git branch --merged" alone will not see it. Those branches
+    are instead tested by content, via Git.is_squash_merged() -- see there for exactly what
+    counts as a match. This is a heuristic, not a guarantee from git itself, so matches found
+    this way are reported separately from the plain ancestor matches.
+    """
+
+    branches: list[str] = []
+    dry_run: bool = False
+    ignore_errors: bool = False
+    squash_merged: bool = False
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.main = parent
+        self.git = Git()
+
+    def setup(self, args) -> int | None:
+        parser = argparse.ArgumentParser(prog=args[0], description="Delete local branches already merged into the given branches")
+        parser.add_argument("branches", nargs="+", help="branches to check merged status against (e.g. main develop)")
+        parser.add_argument("--dry-run", action="store_true", help="only report the branches that would be deleted, do not delete anything")
+        parser.add_argument("-i", "--ignore-errors", action="store_true", help="if deleting a branch fails, continue with the remaining branches instead of stopping, then report all the failures at the end")
+        parser.add_argument("-s", "--squash-merged", action="store_true", help="also test every other local branch by content, to catch branches that were squashed into a single commit in the target rather than merged as-is")
+
+        parser.parse_args(args[1:], namespace=self)
+
+        return None
+
+    def execute(self) -> int:
+        try:
+            return self.execute_prune()
+        except CommandError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+
+    def execute_prune(self) -> int:
+        current = self.git.current_branch()
+        excluded = set(self.branches) | ({current} if current else set())
+
+        ancestor_merged: set[str] = set()
+        for branch in self.branches:
+            ancestor_merged |= set(self.git.merged_branches(branch))
+        ancestor_merged -= excluded
+
+        squash_merged: set[str] = set()
+        if self.squash_merged:
+            remaining = sorted(set(self.git.list_local_branches()) - excluded - ancestor_merged)
+            for name in remaining:
+                if any(self.git.is_squash_merged(name, target) for target in self.branches):
+                    squash_merged.add(name)
+
+        candidates = sorted(ancestor_merged | squash_merged)
+
+        if not candidates:
+            print("No merged branches found; nothing to do.")
+            return 0
+
+        print("Merged branches found:")
+        for name in candidates:
+            note = " (squash-merged, content match only)" if name in squash_merged else ""
+            print(f"  {name}{note}")
+
+        if self.dry_run:
+            return 0
+
+        failures: list[tuple[str, str]] = []
+        for name in candidates:
+            if self.ignore_errors:
+                try:
+                    self.git.delete_branch(name)
+                except CommandError as e:
+                    failures.append((name, str(e)))
+                    continue
+            else:
+                self.git.delete_branch(name)
+            print(f"deleted {name}")
+
+        if failures:
+            print("\nFailed to delete the following branches:", file=sys.stderr)
+            for name, error in failures:
+                print(f"  {name}: {error}", file=sys.stderr)
+            return 1
+
+        return 0
+
+
 class Main(Command):
     command: Command | None = None
     subcommand: list[str] = []
@@ -446,8 +597,10 @@ class Main(Command):
             self.command = LogToTimestamp(self)
         elif self.subcommand[0] == 'git-revert-mod':
             self.command = GitRevertModCommand(self)
+        elif self.subcommand[0] == 'git-prune-merged':
+            self.command = GitPruneMergedCommand(self)
         else:
-            print("Supported subcommands: spotless-to-diff, log-to-timestamp, git-revert-mod", file=sys.stderr)
+            print("Supported subcommands: spotless-to-diff, log-to-timestamp, git-revert-mod, git-prune-merged", file=sys.stderr)
             return 122
 
         self.subcommand[0] = args[0] + " " + self.subcommand[0]

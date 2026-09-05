@@ -4,6 +4,8 @@
 #
 # zbynek-aws-tool - various AWS manipulation utilities:
 #   dynamodb convert: converts DynamoDb type based output to simple JSON
+#   get-log: retrieves a full CloudWatch log stream, formatted as "<UTC timestamp> <message>" lines
+#             (--tail to keep polling for new events, like tail -f)
 #
 # Copyright 2024-2025 Zbynek Vyskovsky mailto:kvr000@gmail.com http://github.com/kvr000/ https://github.com/kvr000/zbynek-util https://www.linkedin.com/in/zbynek-vyskovsky/
 #
@@ -27,6 +29,11 @@ import logging
 import json
 import sys
 import argparse
+import subprocess
+import os
+import time
+from datetime import datetime, timezone
+from typing import TextIO
 
 
 class Command:
@@ -123,6 +130,87 @@ class DynamoDbCommand(MainSubCommand):
         return self.command.run(self.subcommand)
 
 
+class GetLogCommand(MainSubCommand):
+    POLL_INTERVAL_SECONDS = 2
+
+    group: str
+    stream: str
+    tail: bool = False
+
+    def setup(self, args) -> int | None:
+        parser = argparse.ArgumentParser(prog=args[0], description="Retrieve a full CloudWatch log stream, formatted as 'timestamp message' lines")
+        parser.add_argument("group", type=str, help="CloudWatch log group name")
+        parser.add_argument("stream", type=str, help="CloudWatch log stream name")
+        parser.add_argument("-f", "--tail", action="store_true",
+                             help="After reaching the end of the stream, keep polling for new events instead of exiting (like tail -f)")
+
+        parser.parse_args(args[1:], namespace=self)
+
+        return None
+
+    def execute(self) -> int:
+        next_token: str | None = None
+
+        try:
+            while True:
+                cmd = [
+                    "aws", "logs", "get-log-events",
+                    "--log-group-name", self.group,
+                    "--log-stream-name", self.stream,
+                    "--start-from-head",
+                    "--output", "json",
+                ]
+                if next_token is not None:
+                    cmd += ["--next-token", next_token]
+
+                # Force the aws CLI subprocess itself to emit UTF-8 on stdout/stderr, regardless of
+                # the local/system locale. The aws CLI is a Python program: absent this, Python
+                # picks its stdout text encoding from the locale.
+                child_env = {**os.environ, "PYTHONUTF8": "1" ,
+                    # "AWS_CLI_OUTPUT_ENCODING": "UTF-8", "AWS_CLI_FILE_ENCODING": "UTF-8",
+                }
+                result = subprocess.run(cmd, capture_output=True, env=child_env)
+                if result.returncode != 0:
+                    sys.stderr.buffer.write(result.stderr)
+                    return result.returncode
+
+                # Decode with surrogateescape rather than strict utf-8: CloudWatch log messages can
+                # contain bytes that are not valid UTF-8 (binary data, a different original encoding,
+                # etc). surrogateescape preserves those bytes losslessly in the string instead of
+                # raising UnicodeDecodeError; print_event() encodes back the same way on output so the
+                # original bytes reach stdout unchanged instead of crashing or being lost.
+                data = json.loads(result.stdout.decode("utf-8", errors="surrogateescape"))
+                for event in data.get("events", []):
+                    self.print_event(sys.stdout, event)
+                sys.stdout.flush()
+
+                new_token = data.get("nextForwardToken")
+                caught_up = new_token == next_token
+                next_token = new_token
+
+                if caught_up:
+                    if not self.tail:
+                        break
+                    sys.stdout.flush()
+                    time.sleep(self.POLL_INTERVAL_SECONDS)
+        except KeyboardInterrupt:
+            return 130
+
+        return 0
+
+    @staticmethod
+    def print_event(fd: TextIO, event: dict) -> None:
+        # Use the event's 'timestamp' (time recorded by the log producer / PutLogEvents caller),
+        # not 'ingestionTime' (when CloudWatch Logs received/stored it): 'timestamp' reflects when
+        # the event actually happened, which is what a log file's timestamp column should show.
+        epoch_ms = event["timestamp"]
+        dt = datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc)
+        ts_str = dt.strftime("%Y-%m-%dT%H:%M:%S") + f".{epoch_ms % 1000:03d}Z"
+        message = event["message"].rstrip("\n")
+        line = f"{ts_str} {message}\n"
+        fd.buffer.write(line.encode("utf-8", errors="surrogateescape"))
+
+
 class Main(Command):
     command: Command | None = None
     subcommand: list[str] = []
@@ -139,8 +227,10 @@ class Main(Command):
 
         if self.subcommand[0] == 'dynamodb':
             self.command = DynamoDbCommand(self)
+        elif self.subcommand[0] == 'get-log':
+            self.command = GetLogCommand(self)
         else:
-            print("Supported subcommands: dynamodb", file=sys.stderr)
+            print("Supported subcommands: dynamodb get-log", file=sys.stderr)
             return 122
 
         self.subcommand[0] = args[0] + " " + self.subcommand[0]

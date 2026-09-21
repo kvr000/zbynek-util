@@ -57,6 +57,7 @@ def main():
         print("Usage: run_with_env.py [-e env=value] [-u env] [-s direct_substitute=replacement] [files.env ...] command [args...]\n\tType -h for help", file=sys.stderr)
         sys.exit(122)
 
+    verbose = False
     merged_env = os.environ.copy()
 
     substitutes = {}
@@ -69,6 +70,7 @@ def main():
             print("\t-s key=value\tDirectly substitutes text from key to value in environment files")
             print("\t-e key=value\tSets environment variable key to value")
             print("\t-u key\t\tUnsets environment variable key")
+            print("\t-v\t\tVerbose")
             print("\tfiles.env...\tLoads and sets environment from files, replacing the substitute (direct) and environment placeholders (${key} pattern")
             print("\t--\t\tEnd of options")
             print("\tcommand...\tCommand to execute with its arguments")
@@ -98,6 +100,8 @@ def main():
                 print("-u requires argument: name of environment variable", file=sys.stderr)
                 sys.exit(122)
             del merged_env[sys.argv[i]]
+        elif arg == '-v':
+            verbose = True
         elif arg.endswith(".env"):
             new_env = load_env_file(Path(arg))
             # Expand placeholders using existing and new env
@@ -115,7 +119,8 @@ def main():
 
     # Remaining args form the command to run
     cmd = sys.argv[cmd_start:]
-    print(f"Running: {' '.join(cmd)}")
+    if verbose:
+        print(f"Running: {' '.join(cmd)}", file=sys.stderr)
     process = subprocess.Popen(cmd, env=merged_env)
     while True:
         try:

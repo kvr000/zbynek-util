@@ -47,7 +47,7 @@ sub readIndex()
 		or die "failed to open file.idx: $!";
 	while (<$fd>) {
 		chomp;
-		die "failed to match index line: $_" unless (m/^(\w+)\s+(\d+)\s+(\d+)-(\d+)-(\d+)T(\d+):(\d+):(\d+)\s+(.*)$/);
+		die "failed to match index line: $_" unless (m/^(\w+)\s+(\d+)\s+(\d+)-(\d+)-(\d+)T(\d+):(\d+):(\d+)Z?\s+(.*)$/);
 		push(@list, { hash => $1, size => $2, mtime => timegm($8, $7, $6, $5, $4-1, $3-1900), fname => $9, full => $_ });
 	}
 	return @list;
@@ -56,7 +56,7 @@ sub readIndex()
 sub formatIndexLine($)
 {
 	my $file = shift;
-	return sprintf("%32s %12d %19s %s\n", $file->{hash}, $file->{size}, strftime("%FT%T", gmtime($file->{mtime})), $file->{fname});
+	return sprintf("%32s %12d %19s %s\n", $file->{hash}, $file->{size}, strftime("%FT%TZ", gmtime($file->{mtime})), $file->{fname});
 }
 
 sub writeIndex(@)

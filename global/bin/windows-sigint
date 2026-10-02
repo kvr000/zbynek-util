@@ -1,0 +1,54 @@
+#!/bin/bash -e
+
+# Sends Ctrl+C (Windows equivalent of SIGTERM) to a console process, e.g. java.exe.
+# Usage: windows-sigint <WINPID>          (DEBUG=1 windows-sigint <WINPID> prints a trace)
+#
+[[ $1 =~ ^[0-9]+$ ]] || { echo "Usage: ${0##*/} <WINPID>" >&2; exit 2; }
+
+LOG=/tmp/stop-java.$$.log
+: > "$LOG"
+
+read -r -d '' PS <<'EOF' || true
+$log = '@LOG@'
+function L($m) { Add-Content -LiteralPath $log -Value $m }
+function E { [Runtime.InteropServices.Marshal]::GetLastWin32Error() }
+try {
+Add-Type -Namespace Win32 -Name Con -MemberDefinition @'
+[DllImport("kernel32.dll", SetLastError=true)] public static extern bool FreeConsole();
+[DllImport("kernel32.dll", SetLastError=true)] public static extern bool AttachConsole(uint pid);
+[DllImport("kernel32.dll", SetLastError=true)] public static extern bool SetConsoleCtrlHandler(IntPtr h, bool add);
+[DllImport("kernel32.dll", SetLastError=true)] public static extern bool GenerateConsoleCtrlEvent(uint ev, uint group);
+[DllImport("kernel32.dll", SetLastError=true)] public static extern uint GetConsoleProcessList(uint[] list, uint count);
+'@
+$target = @PID@
+$p = Get-Process -Id $target -ErrorAction SilentlyContinue
+L "powershell PID $PID; target $target = $(if ($p) { "$($p.ProcessName) $($p.Path)" } else { 'NOT FOUND' })"
+
+$r = [Win32.Con]::FreeConsole();             L "FreeConsole           -> $r (err $(E))"
+$r = [Win32.Con]::AttachConsole($target);    L "AttachConsole($target) -> $r (err $(E))"
+if (-not $r) { L 'Cannot attach: err 6 = target has no console, 5 = access denied, 87 = no such process'; exit 1 }
+
+$ids = New-Object uint32[] 64
+$n = [Win32.Con]::GetConsoleProcessList($ids, 64)
+L "Processes on target console:"
+$ids[0..($n-1)] | ForEach-Object { $q = Get-Process -Id $_ -ErrorAction SilentlyContinue; L "  $_ $($q.ProcessName)" }
+
+$r = [Win32.Con]::SetConsoleCtrlHandler([IntPtr]::Zero, $true); L "SetConsoleCtrlHandler -> $r (err $(E))"
+$ok = [Win32.Con]::GenerateConsoleCtrlEvent(0, 0);              L "GenerateConsoleCtrlEvent(CTRL_C) -> $ok (err $(E))"
+Start-Sleep -Milliseconds 200
+[void][Win32.Con]::FreeConsole()
+
+if ($p) { $exited = $p.WaitForExit(3000); L "Target exited within 3 s: $exited" }
+exit [int](-not $ok)
+} catch { L "EXCEPTION: $_"; exit 3 }
+EOF
+
+PS=${PS//@PID@/$1}
+PS=${PS//@LOG@/$(cygpath -w "$LOG")}
+powershell.exe -NoProfile -NonInteractive -EncodedCommand \
+    "$(printf '%s' "$PS" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)"
+rc=$?
+
+[[ -n $DEBUG ]] && { cat "$LOG" >&2; echo "exit code: $rc" >&2; }
+rm -f "$LOG"
+exit $rc

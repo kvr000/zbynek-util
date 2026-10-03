@@ -8,6 +8,7 @@ sudo yum -y install clang
 sudo yum -y install mc lynx curl
 sudo yum -y install `sudo yum list | grep '^java-[0-9]' | sort | tail -1 | awk '{ print $1; }'`
 sudo yum -y install java-1.8.0-openjdk
+sudo yum -y install java-25-openjdk-devel
 sudo yum -y install ant maven gradle
 sudo yum -y install gzip zstd brotli bzip2 xz pigz zip unzip
 sudo yum -y install less lesspipe
@@ -40,10 +41,10 @@ sudo yum -y install cpan perl-Tie-IxHash perl-XML-LibXML perl-File-Slurp perl-Te
 #sudo cpan HTTP::Proxy
 #sudo cpan Compress::Zstd
 
-sudo sysctl kernel.sysrq=1
-sudo perl -i -pe 's/^#?\s*(kernel.sysrq\s*=\s*).*$/${1}1/' /etc/sysctl.conf
-sudo sysctl kernel.yama.ptrace_scope=0
-sudo perl -i -pe 's/^(\s*kernel.yama.ptrace_scope\s*=\s*).*/${1}0/' /etc/sysctl.d/10-ptrace.conf
+sudo sysctl kernel.sysrq=1 || true
+sudo perl -i -pe 's/^#?\s*(kernel.sysrq\s*=\s*).*$/${1}1/' /etc/sysctl.conf || true
+sudo sysctl kernel.yama.ptrace_scope=0 || true
+sudo perl -i -pe 's/^(\s*kernel.yama.ptrace_scope\s*=\s*).*/${1}0/' /etc/sysctl.d/10-ptrace.conf || true
 
-sudo perl -i -pe 's/^(\s*<policy domain="resource" name="disk" value=)"[^"]+"(\/>)/$1"8GiB"$2/' /etc/ImageMagick-6/policy.xml
-sudo perl -i -pe 's/^(\s*)(<policy domain="coder" rights="none" pattern="PDF" \/>.*)/$1<!-- $2 -->/' /etc/ImageMagick-6/policy.xml
+sudo perl -i -pe 's/^(\s*<policy domain="resource" name="disk" value=)"[^"]+"(\/>)/$1"8GiB"$2/' /etc/ImageMagick-6/policy.xml || true
+sudo perl -i -pe 's/^(\s*)(<policy domain="coder" rights="none" pattern="PDF" \/>.*)/$1<!-- $2 -->/' /etc/ImageMagick-6/policy.xml || true

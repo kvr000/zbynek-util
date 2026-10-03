@@ -11,9 +11,9 @@ sudo apt -y install cpufrequtils lm-sensors linux-tools-common linux-tools-gener
 sudo apt -y install g++
 sudo apt -y install clang
 sudo apt -y install mc lynx curl
-sudo apt -y install `sudo apt list | grep '^openjdk-[^/]*-jdk/' | sort -t - --key 2 -n | grep -E -- '-(17|21)-' | tail -1 | sed 's,/.*,,'`
-sudo apt -y install `sudo apt list | grep '^openjdk-[^/]*-source/' | sort -t - --key 2 -n | grep -E -- '-(17|21)-' | tail -1 | sed 's,/.*,,'`
-sudo apt -y install openjdk-8-jdk openjdk-21-jdk
+sudo apt -y install `sudo apt list | grep '^openjdk-[^/]*-jdk/' | sort -t - --key 2 -n | grep -E -- '-(17|25)-' | tail -1 | sed 's,/.*,,'`
+sudo apt -y install `sudo apt list | grep '^openjdk-[^/]*-source/' | sort -t - --key 2 -n | grep -E -- '-(17|25)-' | tail -1 | sed 's,/.*,,'`
+sudo apt -y install openjdk-8-jdk openjdk-25-jdk
 sudo apt -y install ant maven gradle
 sudo apt -y install gzip zstd brotli bzip2 xz-utils pigz zip unzip unrar
 sudo apt -y install less
@@ -51,12 +51,12 @@ sudo apt -y install perl libextutils-makemaker-cpanfile-perl libtie-ixhash-perl 
 sudo apt -y install mpv
 
 sudo sysctl kernel.sysrq=1 || true
-sudo perl -i -pe 's/^#?\s*(kernel.sysrq\s*=\s*).*$/${1}1/' /etc/sysctl.conf
+sudo perl -i -pe 's/^#?\s*(kernel.sysrq\s*=\s*).*$/${1}1/' /etc/sysctl.conf || true
 sudo sysctl kernel.yama.ptrace_scope=0 || true
 sudo perl -i -pe 's/^(\s*kernel.yama.ptrace_scope\s*=\s*).*/${1}0/' /etc/sysctl.d/10-ptrace.conf || true
 
-sudo perl -i -pe 's/^(\s*<policy domain="resource" name="disk" value=)"[^"]+"(\/>)/$1"8GiB"$2/' /etc/ImageMagick-7/policy.xml
-sudo perl -i -pe 's/^(\s*)(<policy domain="coder" rights="none" pattern="PDF" \/>.*)/$1<!-- $2 -->/' /etc/ImageMagick-7/policy.xml
+sudo perl -i -pe 's/^(\s*<policy domain="resource" name="disk" value=)"[^"]+"(\/>)/$1"8GiB"$2/' /etc/ImageMagick-7/policy.xml || true
+sudo perl -i -pe 's/^(\s*)(<policy domain="coder" rights="none" pattern="PDF" \/>.*)/$1<!-- $2 -->/' /etc/ImageMagick-7/policy.xml || true
 
 if [ -r /etc/wsl.conf ] && ! grep '^\[automount\]' < /etc/wsl.conf >/dev/null; then
 	sudo tee -a /etc/wsl.conf <<EOS

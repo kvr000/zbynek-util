@@ -1,162 +1,249 @@
-#!/usr/bin/env perl
+#!/usr/bin/env python3
 
-use strict;
-use warnings;
+import argparse
+import hashlib
+import os
+import shutil
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
+from pathlib import Path
 
-use FileHandle;
-use Getopt::Std;
-use Digest::MD5;
-use Time::Local;
-use POSIX qw(strftime);
-use File::Copy;
+
+INDEX_FILE = Path("file.idx")
+BACKUP_INDEX_FILE = Path("file-bak.idx")
+BUFFER_SIZE = 4 * 1024 * 1024
 
 
-our %opts;
+def calculate_digest(item):
+    print(f"reindexing {item['filename']} (size={item['size']})", file=sys.stderr)
 
-sub calculateDigest($)
-{
-	my ( $filename ) = @_;
+    md5 = hashlib.md5()
 
-	my $fh = FileHandle->new($_, "<:raw")
-		or die "failed to open $_: $!";
+    try:
+        with open(item['filename'], "rb") as f:
+            while True:
+                buf = f.read(BUFFER_SIZE)
+                if not buf:
+                    break
+                md5.update(buf)
+    except OSError as e:
+        raise RuntimeError(f"failed to open/read {item['filename']}: {e}") from e
 
-	my $md5 = Digest::MD5->new();
+    item['hash'] = md5.hexdigest()
 
-	if (0) {
-		$md5->addfile($fh);
-	}
-	else {
-		my $buf;
-		my $bufsize = 4 * 1024 * 1024;
+    return item
 
-		for (;;) {
-			my $n = sysread($fh, $buf, $bufsize);
-			die "read error on $_: $!" unless defined $n;
-			last if $n == 0;
-			$md5->add($buf);
-		}
-	}
 
-	return $md5->hexdigest();
-}
+def read_index():
+    result = []
 
-sub readIndex()
-{
-	my @list = ();
-	my $fd = FileHandle->new("file.idx", "<:raw")
-		or die "failed to open file.idx: $!";
-	while (<$fd>) {
-		chomp;
-		die "failed to match index line: $_" unless (m/^(\w+)\s+(\d+)\s+(\d+)-(\d+)-(\d+)T(\d+):(\d+):(\d+)Z?\s+(.*)$/);
-		push(@list, { hash => $1, size => $2, mtime => timegm($8, $7, $6, $5, $4-1, $3-1900), fname => $9, full => $_ });
-	}
-	return @list;
-}
+    try:
+        with open(INDEX_FILE, "r", encoding="utf-8", newline="") as fd:
+            for line in fd:
+                line = line.rstrip("\r\n")
 
-sub formatIndexLine($)
-{
-	my $file = shift;
-	return sprintf("%32s %12d %19s %s\n", $file->{hash}, $file->{size}, strftime("%FT%TZ", gmtime($file->{mtime})), $file->{fname});
-}
+                parts = line.split(None, 3)
+                if len(parts) != 4:
+                    raise RuntimeError(
+                            f"failed to match index line: {line}"
+                            )
 
-sub writeIndex(@)
-{
-	copy("file.idx", "file-bak.idx") or die "copy file.idx to file-bak.idx failed: $!";
+                digest, size, timestamp, filename = parts
 
-	if (!eval {
-		my $fd = FileHandle->new("file.idx", ">:raw");
+                try:
+                    dt = datetime.strptime(
+                            timestamp,
+                            "%Y-%m-%dT%H:%M:%SZ"
+                            ).replace(tzinfo=timezone.utc)
+                except ValueError as e:
+                    raise RuntimeError(
+                            f"failed to match index line: {line}"
+                            ) from e
 
-		no locale;
-		foreach (sort( { $a->{fname} cmp $b->{fname} } @_)) {
-			$fd->print(formatIndexLine($_)) or die "Failed to write to index: $!";
-		}
-		$fd->close()
-			or die "failed to update index: $!";
-		1;
-	}) {
-		copy("file-bak.idx", "file.idx");
-		die $@;
-	}
-}
+                result.append({
+                    "hash": digest,
+                    "size": int(size),
+                    "mtime": dt.timestamp(),
+                    "filename": filename,
+                    "full": line,
+                    })
+    except OSError as e:
+        raise RuntimeError(f"failed to open {INDEX_FILE}: {e}") from e
 
-sub runPrintDups()
-{
-	my %index_hash;
+    return result
 
-	foreach (readIndex()) {
-		push(@{$index_hash{$_->{hash}}}, $_);
-	}
 
-	no locale;
-	foreach my $index_entry (sort( { $a->[0]->{fname} cmp $b->[0]->{fname} } grep( { $#$_ > 0 } values %index_hash))) {
-		foreach my $file (@$index_entry) {
-			print("$file->{full}\n");
-		}
-	}
-}
+def format_index_line(file):
+    timestamp = datetime.fromtimestamp(
+            file["mtime"], timezone.utc
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-sub runUpdateIndex()
-{
-	my %index_fname;
+    return f"{file['hash']:>32} {file['size']:>12} {timestamp:>19} {file['filename']}\n"
 
-	foreach (readIndex()) {
-		$index_fname{$_->{fname}} = $_;
-	}
 
-	my $fdidx = FileHandle->new("file.idx", ">>:raw");
-	my @list;
-	my $total = 0;
+def write_index(files):
+    try:
+        shutil.copyfile(INDEX_FILE, BACKUP_INDEX_FILE)
+    except OSError as e:
+        raise RuntimeError(
+                f"copy {INDEX_FILE} to {BACKUP_INDEX_FILE} failed: {e}"
+                ) from e
 
-	while (<>) {
-		chomp;
-		my @st = stat($_)
-			or die "failed to stat $_: $!";
-		my $file;
-		if (defined ($file = $index_fname{$_}) && $file->{size} == $st[7] && $file->{mtime} == $st[9]) {
-		}
-		else {
-			STDERR->print("reindexing $_ (size=$st[7])\n");
-			$total += $st[7];
-			if (!$opts{t}) {
-				my $digest = calculateDigest($_);
-				$file = { hash => $digest, size => $st[7], mtime => $st[9], fname => $_ };
-				$fdidx->print(formatIndexLine($file));
-				$fdidx->flush();
-			}
-			else {
-				next;
-			}
-		}
-		push(@list, $file);
-	}
-	$fdidx->close(); undef $fdidx;
-	STDERR->print("reindexed $total bytes\n");
+    try:
+        with open(INDEX_FILE, "w", encoding="utf-8", newline="") as fd:
+            for file in sorted(files, key=lambda f: f["filename"]):
+                fd.write(format_index_line(file))
+    except Exception:
+        try:
+            shutil.copyfile(BACKUP_INDEX_FILE, INDEX_FILE)
+        except OSError:
+            pass
+        raise
 
-	return if ($opts{t});
-	if (!@list && !$opts{f}) {
-		die "input list is empty, use -f to force creation of empty index file";
-	}
-	writeIndex(@list);
-}
 
-getopts("fupth", \%opts)
-	or die "Usage: $0 [-f] [-t] {-u|-p|-h}\n";
+def run_print_dups():
+    index_hash = {}
 
-if ($opts{p}) {
-	runPrintDups();
-}
-elsif ($opts{u}) {
-	runUpdateIndex();
-}
-else {
-	STDERR->print(<<EOS
-Usage: $0 [-f] [-t] {-u|-p|-h}
--f		force update even if the input is empty
--u		update the index file
--p		print duplicates
--t		test, only print what would have been done
--h		print this help
-EOS
-	);
-	exit(2);
-}
+    for entry in read_index():
+        index_hash.setdefault(entry["hash"], []).append(entry)
+
+    duplicates = [
+            entries
+            for entries in index_hash.values()
+            if len(entries) > 1
+            ]
+
+    duplicates.sort(key=lambda entries: entries[0]["filename"])
+
+    for entries in duplicates:
+        for file in entries:
+            print(file["full"])
+
+
+def update_index(files_to_process, force, test, jobs):
+    index_filename = {}
+
+    for entry in read_index():
+        index_filename[entry["filename"]] = entry
+
+    files = []
+    futures = []
+    total = 0
+
+    index_lock = threading.Lock()
+
+    with open(INDEX_FILE, "a", encoding="utf-8", newline="") as index_fd, \
+        ThreadPoolExecutor(max_workers=jobs) as executor:
+
+        for filename in files_to_process:
+            try:
+                st = Path(filename).stat()
+            except OSError as e:
+                raise RuntimeError(f"failed to stat {filename}: {e}") from e
+
+            old_file = index_filename.get(filename)
+
+            if (
+                    old_file is not None
+                    and int(old_file["size"]) == int(st.st_size)
+                    and int(old_file["mtime"]) == int(st.st_mtime)
+                    ):
+                files.append(old_file)
+                continue
+
+            total += st.st_size
+
+            item = {
+                    "filename": filename,
+                    "size": st.st_size,
+                    "mtime": st.st_mtime,
+                    }
+            def completion(future, item=item):
+                try:
+                    with index_lock:
+                        future.result()
+                        files.append(item)
+                        index_fd.write(format_index_line(item))
+                        index_fd.flush()
+                except Exception as e:
+                    print(f"Failed to index file {item['filename']}: {str(e)}", file=sys.stderr)
+
+            future = executor.submit(calculate_digest, item)
+            future.add_done_callback(completion)
+            futures.append(future)
+
+    # ThreadPoolExecutor is appropriate here because hashlib performs
+    # the expensive MD5 work in native code and releases the GIL.
+    if not files and not force:
+        raise RuntimeError(
+                "input list is empty, use -f to force creation of empty index file"
+                )
+
+    # All hashing is finished at this point.
+    print(f"reindexed {total} bytes", file=sys.stderr)
+
+    write_index(files)
+
+
+def print_help(parser):
+    parser.print_help()
+
+
+def main():
+    default_jobs = os.cpu_count() // 2 or 1
+
+    parser = argparse.ArgumentParser( add_help=False, usage="%(prog)s [-f] [-t] [-j N] {-u|-p|-h}")
+    parser.add_argument("-f", action="store_true", help="force update even if the input is empty")
+    parser.add_argument("-u", action="store_true", help="update the index file")
+    parser.add_argument("-p", action="store_true", help="print duplicates")
+    parser.add_argument("-t", action="store_true", help="test, only print what would have been done")
+    parser.add_argument("-j", "--jobs", type=int, default=default_jobs, metavar="N", help=f"number of parallel digest threads (default: {default_jobs})")
+    parser.add_argument("-h", action="store_true", help="print this help")
+    parser.add_argument("files", nargs="*")
+    args = parser.parse_args()
+
+    if args.jobs < 1:
+        parser.error("number of jobs must be at least 1")
+
+    if args.h:
+        print_help(parser)
+        return 2
+
+    if args.p:
+        run_print_dups()
+        return 0
+
+    if args.u:
+        if args.files:
+            files = []
+            for filename in args.files:
+                with open(filename, "r", encoding="utf-8") as fd:
+                    files.extend(line.rstrip("\r\n") for line in fd)
+        else:
+            files = [line.rstrip("\r\n") for line in sys.stdin]
+
+        update_index(files, args.f, args.t, args.jobs)
+        return 0
+
+    print(
+            """Usage: %(prog)s [-f] [-t] [-j N] {-u|-p|-h}
+-f              force update even if the input is empty
+-u              update the index file
+-p              print duplicates
+-t              test, only print what would have been done
+-j N            number of parallel digest threads
+-h              print this help"""
+% {"prog": sys.argv[0]},
+file=sys.stderr,
+)
+    return 122
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except RuntimeError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(127)

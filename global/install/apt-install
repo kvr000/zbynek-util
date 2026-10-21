@@ -6,7 +6,7 @@ set -o pipefail
 sudo apt -y install aptitude
 #sudo apt -y install ecryptfs-utils
 sudo apt -y install cryptsetup
-sudo apt -y install coreutils gnupg2 jq libfaketime faketime parallel telnet lynx net-tools htop
+sudo apt -y install coreutils gnupg2 jq libfaketime faketime parallel telnet lynx net-tools btop htop
 sudo apt -y install cpufrequtils lm-sensors linux-tools-common linux-tools-generic
 sudo apt -y install g++
 sudo apt -y install clang

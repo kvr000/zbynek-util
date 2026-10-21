@@ -64,6 +64,8 @@ rsync					\
 recode					\
 socat					\
 tar					\
+top					\
+btop					\
 vim					\
 vim-common				\
 vim-minimal				\

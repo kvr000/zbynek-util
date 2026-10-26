@@ -6,6 +6,7 @@
 #   spotless-to-diff: converts spotless web output to diff format
 #   git-revert-mod: reverts unintended file mode (executable bit) changes from recent commits
 #   git-prune-merged: deletes local branches already merged into the given branches
+#   keep-sync: keeps destination directory in sync with source, watching for changes (inotify or similar)
 #
 # Copyright 2024-2025 Zbynek Vyskovsky mailto:kvr000@gmail.com http://github.com/kvr000/ https://github.com/kvr000/zbynek-util https://www.linkedin.com/in/zbynek-vyskovsky/
 #
@@ -25,13 +26,21 @@
 
 from __future__ import annotations
 
+import argparse
+import errno
+import fnmatch
 import logging
 import os
+import queue
 import re
+import select
+import shutil
+import stat
+import struct
 import subprocess
 import sys
 import tempfile
-import argparse
+import time
 
 
 class Command:
@@ -577,6 +586,513 @@ class GitPruneMergedCommand(MainSubCommand):
         return 0
 
 
+class _PrefixLogger(logging.LoggerAdapter):
+    """
+    Prefixes every message with given text (e.g. destination directory), so messages from
+    several concurrently running instances can be told apart.
+    """
+
+    def __init__(self, logger: logging.Logger, prefix: str):
+        super().__init__(logger, {})
+        # the prefix becomes part of format string, so escape any % in it
+        self.prefix = prefix.replace("%", "%%")
+
+    def process(self, msg, kwargs):
+        return f"{self.prefix}: {msg}", kwargs
+
+
+class _PollWatcher:
+    """
+    Fallback change "notification": simply requests full rescan every interval.
+    """
+
+    name = "poll"
+
+    def __init__(self, interval: float):
+        self.interval = max(0.1, interval)
+        self.next = time.monotonic() + self.interval
+
+    def wait(self, timeout: float | None) -> list[tuple[str | None, bool]]:
+        remaining = self.next - time.monotonic()
+        if timeout is not None and timeout < remaining:
+            time.sleep(max(0.0, timeout))
+            return []
+        time.sleep(max(0.0, remaining))
+        self.next = time.monotonic() + self.interval
+        return [(None, True)]
+
+    def close(self) -> None:
+        pass
+
+
+class _WatchdogWatcher:
+    """
+    Change notification through Python watchdog package, which supports inotify (Linux),
+    FSEvents (MacOS), kqueue (BSD) and ReadDirectoryChangesW (Windows).
+    """
+
+    name = "watchdog"
+
+    def __init__(self, root: str):
+        from watchdog.observers import Observer
+        from watchdog.events import FileSystemEventHandler
+
+        self.queue: queue.Queue = queue.Queue()
+        events = self.queue
+
+        class Handler(FileSystemEventHandler):
+            def on_any_event(self, event):
+                if event.event_type in ("opened", "closed_no_write"):
+                    return
+                recursive = event.is_directory and event.event_type in ("created", "moved")
+                events.put((os.fsdecode(event.src_path), recursive and event.event_type == "created"))
+                dest_path = getattr(event, "dest_path", None)
+                if dest_path:
+                    events.put((os.fsdecode(dest_path), recursive))
+
+        self.observer = Observer()
+        self.observer.schedule(Handler(), root, recursive=True)
+        self.observer.start()
+
+    def wait(self, timeout: float | None) -> list[tuple[str | None, bool]]:
+        # limit the blocking time, so KeyboardInterrupt is delivered also on Windows
+        timeout = 1.0 if timeout is None else min(timeout, 1.0)
+        try:
+            result = [self.queue.get(timeout=timeout)]
+        except queue.Empty:
+            return []
+        while True:
+            try:
+                result.append(self.queue.get_nowait())
+            except queue.Empty:
+                return result
+
+    def close(self) -> None:
+        self.observer.stop()
+        self.observer.join()
+
+
+class _InotifyWatcher:
+    """
+    Change notification through Linux inotify, accessed directly through ctypes, so it does not
+    need any extra package. Watches are added recursively for every directory, including the
+    directories created or moved in later.
+    """
+
+    name = "inotify"
+
+    IN_MODIFY = 0x00000002
+    IN_ATTRIB = 0x00000004
+    IN_CLOSE_WRITE = 0x00000008
+    IN_MOVED_FROM = 0x00000040
+    IN_MOVED_TO = 0x00000080
+    IN_CREATE = 0x00000100
+    IN_DELETE = 0x00000200
+    IN_DELETE_SELF = 0x00000400
+    IN_MOVE_SELF = 0x00000800
+    IN_Q_OVERFLOW = 0x00004000
+    IN_IGNORED = 0x00008000
+    IN_ONLYDIR = 0x01000000
+    IN_DONT_FOLLOW = 0x02000000
+    IN_ISDIR = 0x40000000
+    IN_CLOEXEC = 0o2000000
+
+    WATCH_MASK = IN_MODIFY | IN_ATTRIB | IN_CLOSE_WRITE | IN_MOVED_FROM | IN_MOVED_TO | IN_CREATE | IN_DELETE \
+        | IN_DELETE_SELF | IN_MOVE_SELF | IN_ONLYDIR | IN_DONT_FOLLOW
+
+    def __init__(self, root: str, is_excluded, log: logging.LoggerAdapter):
+        import ctypes
+        import ctypes.util
+
+        self.ctypes = ctypes
+        self.libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
+        self.libc.inotify_init1.argtypes = [ctypes.c_int]
+        self.libc.inotify_add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
+        self.is_excluded = is_excluded
+        self.log = log
+        self.fd = self.libc.inotify_init1(self.IN_CLOEXEC)
+        if self.fd < 0:
+            err = ctypes.get_errno()
+            raise OSError(err, f"inotify_init1 failed: {os.strerror(err)}")
+        self.wds: dict[int, str] = {}
+        self.add_tree(root)
+
+    def add_watch(self, path: str) -> None:
+        wd = self.libc.inotify_add_watch(self.fd, os.fsencode(path), self.WATCH_MASK)
+        if wd < 0:
+            err = self.ctypes.get_errno()
+            if err == errno.ENOSPC:
+                self.log.warning("inotify watch limit reached, increase sysctl fs.inotify.max_user_watches, not watching: %s", path)
+            elif err not in (errno.ENOENT, errno.ENOTDIR):
+                self.log.warning("failed to watch %s: %s", path, os.strerror(err))
+            return
+        self.wds[wd] = path
+
+    def add_tree(self, path: str) -> None:
+        if self.is_excluded(path):
+            return
+        for dirpath, dirnames, _ in os.walk(path):
+            dirnames[:] = [d for d in dirnames if not self.is_excluded(os.path.join(dirpath, d))]
+            self.add_watch(dirpath)
+
+    def wait(self, timeout: float | None) -> list[tuple[str | None, bool]]:
+        ready, _, _ = select.select([self.fd], [], [], timeout)
+        if not ready:
+            return []
+        data = os.read(self.fd, 256 * 1024)
+        events: list[tuple[str | None, bool]] = []
+        offset = 0
+        while offset + 16 <= len(data):
+            wd, mask, _cookie, length = struct.unpack_from("iIII", data, offset)
+            name = data[offset + 16:offset + 16 + length].rstrip(b"\0")
+            offset += 16 + length
+            if mask & self.IN_Q_OVERFLOW:
+                self.log.warning("inotify queue overflow, doing full rescan")
+                events.append((None, True))
+                continue
+            if mask & self.IN_IGNORED:
+                self.wds.pop(wd, None)
+                continue
+            base = self.wds.get(wd)
+            if base is None:
+                continue
+            path = os.path.join(base, os.fsdecode(name)) if name else base
+            if (mask & self.IN_ISDIR) and (mask & (self.IN_CREATE | self.IN_MOVED_TO)):
+                # new directory: watch it and sync its whole content, as files might have been
+                # created inside before the watch was added
+                self.add_tree(path)
+                events.append((path, True))
+            else:
+                events.append((path, False))
+        return events
+
+    def close(self) -> None:
+        os.close(self.fd)
+
+
+class KeepSyncCommand(MainSubCommand):
+    """
+    Keeps destination directory in sync with source directory: starts watching the source for
+    changes, does an initial full sync and then propagates the changes as they happen.
+
+    The sync is one-directional (source -> destination). Files are considered equal when their
+    size and modification time match (copies preserve the modification time). Files are written
+    to a temporary file next to the target first and then atomically renamed into place.
+    Deletions are propagated too, unless --no-delete is given. Excluded paths are neither copied
+    nor deleted in destination.
+
+    Change notification backends, tried in this order by --watcher auto:
+      watchdog: Python watchdog package, if installed (inotify, FSEvents, kqueue,
+                ReadDirectoryChangesW, i.e. Linux, MacOS, BSD and Windows)
+      inotify:  Linux inotify used directly via ctypes, no extra dependency
+      poll:     periodic full rescan, works everywhere
+    """
+
+    TMP_SUFFIX = ".keep-sync-tmp"
+
+    source: str
+    destination: str
+    delete: bool = True
+    excludes: list[str] = []
+    watcher: str = "auto"
+    delay: float = 0.5
+    poll_interval: float = 2.0
+    rescan_interval: float = 0.0
+    mtime_window: float = 0.01
+    once: bool = False
+    dry_run: bool = False
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.main = parent
+        self.dest_rel: str | None = None
+
+    def setup(self, args) -> int | None:
+        parser = argparse.ArgumentParser(prog=args[0], description="Keep destination directory in sync with source directory, watching the source for changes")
+        parser.add_argument("source", help="source directory")
+        parser.add_argument("destination", help="destination directory, created if it does not exist")
+        parser.add_argument("--no-delete", dest="delete", action="store_false", help="do not delete files in destination which do not exist in source")
+        parser.add_argument("-x", "--exclude", dest="excludes", action="append", default=[], help="glob pattern to exclude, matched against relative path (with /) and file name of each path component, can be repeated")
+        parser.add_argument("-w", "--watcher", choices=["auto", "watchdog", "inotify", "poll"], default="auto", help="change notification backend, auto uses watchdog if installed, inotify on Linux, poll otherwise (default auto)")
+        parser.add_argument("--delay", type=float, default=0.5, help="seconds to wait for changes to settle before syncing (default 0.5)")
+        parser.add_argument("--poll-interval", type=float, default=2.0, help="seconds between rescans for poll watcher (default 2)")
+        parser.add_argument("--rescan-interval", type=float, default=0.0, help="additionally do full rescan every this many seconds, 0 disables (default 0)")
+        parser.add_argument("--mtime-window", type=float, default=0.01, help="modification time difference in seconds still considered equal, use 2 for FAT (default 0.01)")
+        parser.add_argument("--once", action="store_true", help="only do the initial sync and exit")
+        parser.add_argument("-n", "--dry-run", action="store_true", help="only report what initial sync would do, implies --once")
+
+        parser.parse_args(args[1:], namespace=self)
+
+        self.source = os.path.abspath(self.source)
+        self.destination = os.path.abspath(self.destination)
+        self.log = _PrefixLogger(logging.getLogger(), self.destination)
+        if not os.path.isdir(self.source):
+            print(f"error: source is not a directory: {self.source}", file=sys.stderr)
+            return 1
+        if self._is_within(self.source, self.destination):
+            print(f"error: source must not be the destination or be inside it: {self.source}", file=sys.stderr)
+            return 1
+        if self._is_within(self.destination, self.source):
+            self.dest_rel = os.path.relpath(self.destination, self.source).replace(os.sep, "/")
+
+        return None
+
+    def execute(self) -> int:
+        try:
+            return self.execute_sync()
+        except CommandError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+
+    def execute_sync(self) -> int:
+        watcher = None
+        if not self.once and not self.dry_run:
+            # start watching before the initial sync, so changes done during it are not lost
+            watcher = self.create_watcher()
+        try:
+            self.log.info("initial sync from %s", self.source)
+            if not self.dry_run:
+                os.makedirs(self.destination, exist_ok=True)
+            self.sync_tree("")
+            if watcher is None:
+                return 0
+            self.log.info("watching %s using %s", self.source, watcher.name)
+            self.watch_loop(watcher)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            if watcher is not None:
+                watcher.close()
+        return 0
+
+    def create_watcher(self):
+        kind = self.watcher
+        if kind in ("auto", "watchdog"):
+            try:
+                return _WatchdogWatcher(self.source)
+            except ImportError:
+                if kind == "watchdog":
+                    raise CommandError("watchdog package is not installed, install it with: pip install watchdog")
+        if kind in ("auto", "inotify"):
+            if sys.platform.startswith("linux"):
+                try:
+                    return _InotifyWatcher(self.source, self.is_excluded_abs, self.log)
+                except OSError as e:
+                    if kind == "inotify":
+                        raise CommandError(f"cannot use inotify: {e}")
+                    self.log.warning("cannot use inotify, falling back to polling: %s", e)
+            elif kind == "inotify":
+                raise CommandError("inotify is available only on Linux")
+        return _PollWatcher(self.poll_interval)
+
+    def watch_loop(self, watcher) -> None:
+        dirty: dict[str, bool] = {}
+        first = last = 0.0
+        max_delay = max(self.delay * 10, 5.0)
+        next_rescan = time.monotonic() + self.rescan_interval if self.rescan_interval > 0 else None
+        while True:
+            now = time.monotonic()
+            timeout = None
+            if dirty:
+                timeout = max(0.0, min(last + self.delay, first + max_delay) - now)
+            if next_rescan is not None:
+                rescan_timeout = max(0.0, next_rescan - now)
+                timeout = rescan_timeout if timeout is None else min(timeout, rescan_timeout)
+
+            events = watcher.wait(timeout)
+
+            now = time.monotonic()
+            for path, recursive in events:
+                rel = "" if path is None else self.to_rel(path)
+                if rel is None:
+                    continue
+                if not dirty:
+                    first = now
+                last = now
+                dirty[rel] = dirty.get(rel, False) or recursive or path is None
+                if path is None:
+                    # full rescan request (poll or overflow), no point waiting for more changes
+                    first = now - max_delay
+            if next_rescan is not None and now >= next_rescan:
+                dirty[""] = True
+                first = last = now - max_delay
+                next_rescan = now + self.rescan_interval
+            if dirty and (now >= last + self.delay or now >= first + max_delay):
+                self.process_dirty(dirty)
+                dirty = {}
+
+    def process_dirty(self, dirty: dict[str, bool]) -> None:
+        if dirty.get(""):
+            self.sync_tree("")
+            return
+        for rel in sorted(dirty):
+            if rel:
+                self.sync_changed(rel, dirty[rel])
+
+    @staticmethod
+    def _is_within(path: str, parent: str) -> bool:
+        path, parent = os.path.normcase(path), os.path.normcase(parent)
+        try:
+            return os.path.commonpath([path, parent]) == parent
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _lstat(path: str) -> os.stat_result | None:
+        try:
+            return os.lstat(path)
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+
+    @staticmethod
+    def _join(rel: str, name: str) -> str:
+        return os.path.join(rel, name) if rel else name
+
+    def src_path(self, rel: str) -> str:
+        return os.path.join(self.source, rel) if rel else self.source
+
+    def dst_path(self, rel: str) -> str:
+        return os.path.join(self.destination, rel) if rel else self.destination
+
+    def to_rel(self, path: str) -> str | None:
+        path = os.path.abspath(path)
+        if not self._is_within(path, self.source):
+            return None
+        rel = os.path.relpath(path, self.source)
+        return "" if rel == "." else rel
+
+    def is_excluded(self, rel: str) -> bool:
+        parts = rel.replace(os.sep, "/").split("/")
+        if parts[-1].endswith(self.TMP_SUFFIX):
+            return True
+        for i in range(1, len(parts) + 1):
+            prefix = "/".join(parts[:i])
+            if prefix == self.dest_rel:
+                return True
+            for pattern in self.excludes:
+                if fnmatch.fnmatch(prefix, pattern) or fnmatch.fnmatch(parts[i - 1], pattern):
+                    return True
+        return False
+
+    def is_excluded_abs(self, path: str) -> bool:
+        rel = self.to_rel(path)
+        return rel is None or (rel != "" and self.is_excluded(rel))
+
+    def sync_changed(self, rel: str, recursive: bool) -> None:
+        # make sure the parent exists in destination, otherwise sync from the top-most missing one
+        parts = rel.split(os.sep)
+        for i in range(1, len(parts)):
+            ancestor = os.sep.join(parts[:i])
+            if not os.path.isdir(self.dst_path(ancestor)):
+                self.sync_entry(ancestor, True)
+                return
+        self.sync_entry(rel, recursive)
+
+    def sync_tree(self, rel: str) -> None:
+        try:
+            src_names = set(os.listdir(self.src_path(rel)))
+        except (FileNotFoundError, NotADirectoryError):
+            return
+        try:
+            dst_names = set(os.listdir(self.dst_path(rel)))
+        except (FileNotFoundError, NotADirectoryError):
+            dst_names = set()
+        for name in sorted(src_names):
+            self.sync_entry(self._join(rel, name), True)
+        if self.delete:
+            for name in sorted(dst_names - src_names):
+                child = self._join(rel, name)
+                if self.is_excluded(child):
+                    continue
+                if (dst_stat := self._lstat(self.dst_path(child))) is not None:
+                    self.guarded(child, lambda: self.remove(child, dst_stat))
+
+    def sync_entry(self, rel: str, recursive: bool) -> None:
+        if self.is_excluded(rel):
+            return
+        self.guarded(rel, lambda: self._sync_entry(rel, recursive))
+
+    def guarded(self, rel: str, action) -> None:
+        try:
+            action()
+        except OSError as e:
+            self.log.warning("failed to sync %s: %s", rel, e)
+
+    def _sync_entry(self, rel: str, recursive: bool) -> None:
+        src = self.src_path(rel)
+        dst = self.dst_path(rel)
+        src_stat = self._lstat(src)
+        dst_stat = self._lstat(dst)
+        if src_stat is None:
+            if dst_stat is not None and self.delete:
+                self.remove(rel, dst_stat)
+            return
+
+        if stat.S_ISDIR(src_stat.st_mode):
+            if dst_stat is not None and not stat.S_ISDIR(dst_stat.st_mode):
+                self.remove(rel, dst_stat)
+                dst_stat = None
+            if dst_stat is None:
+                self.log.info("mkdir %s", rel)
+                if not self.dry_run:
+                    os.makedirs(dst, exist_ok=True)
+                recursive = True
+            if recursive:
+                self.sync_tree(rel)
+
+        elif stat.S_ISLNK(src_stat.st_mode):
+            target = os.readlink(src)
+            if dst_stat is not None:
+                if stat.S_ISLNK(dst_stat.st_mode) and os.readlink(dst) == target:
+                    return
+                self.remove(rel, dst_stat)
+            self.log.info("symlink %s -> %s", rel, target)
+            if not self.dry_run:
+                os.symlink(target, dst, target_is_directory=os.path.isdir(src))
+
+        elif stat.S_ISREG(src_stat.st_mode):
+            if dst_stat is not None and not stat.S_ISREG(dst_stat.st_mode):
+                self.remove(rel, dst_stat)
+                dst_stat = None
+            if dst_stat is None or src_stat.st_size != dst_stat.st_size \
+                    or abs(src_stat.st_mtime - dst_stat.st_mtime) > self.mtime_window:
+                self.copy_file(rel)
+
+        else:
+            self.log.debug("skipping special file %s", rel)
+
+    def copy_file(self, rel: str) -> None:
+        self.log.info("copy %s", rel)
+        if self.dry_run:
+            return
+        dst = self.dst_path(rel)
+        tmp = os.path.join(os.path.dirname(dst), "." + os.path.basename(dst) + self.TMP_SUFFIX)
+        try:
+            shutil.copy2(self.src_path(rel), tmp)
+            try:
+                os.replace(tmp, dst)
+            except PermissionError:
+                # read-only target on Windows cannot be replaced
+                os.chmod(dst, stat.S_IWRITE | stat.S_IREAD)
+                os.replace(tmp, dst)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+
+    def remove(self, rel: str, dst_stat: os.stat_result) -> None:
+        self.log.info("delete %s", rel)
+        if self.dry_run:
+            return
+        dst = self.dst_path(rel)
+        if stat.S_ISDIR(dst_stat.st_mode):
+            shutil.rmtree(dst)
+        else:
+            os.unlink(dst)
+
+
 class Main(Command):
     command: Command | None = None
     subcommand: list[str] = []
@@ -599,8 +1115,10 @@ class Main(Command):
             self.command = GitRevertModCommand(self)
         elif self.subcommand[0] == 'git-prune-merged':
             self.command = GitPruneMergedCommand(self)
+        elif self.subcommand[0] == 'keep-sync':
+            self.command = KeepSyncCommand(self)
         else:
-            print("Supported subcommands: spotless-to-diff, log-to-timestamp, git-revert-mod, git-prune-merged", file=sys.stderr)
+            print("Supported subcommands: spotless-to-diff, log-to-timestamp, git-revert-mod, git-prune-merged, keep-sync", file=sys.stderr)
             return 122
 
         self.subcommand[0] = args[0] + " " + self.subcommand[0]

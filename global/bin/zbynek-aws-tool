@@ -5,7 +5,7 @@
 # zbynek-aws-tool - various AWS manipulation utilities:
 #   dynamodb convert: converts DynamoDb type based output to simple JSON
 #   get-log: retrieves a full CloudWatch log stream, formatted as "<UTC timestamp> <message>" lines
-#             (--tail to keep polling for new events, like tail -f)
+#             (--tail to keep polling for new events, like tail -f; --last N to start with only the last N events)
 #
 # Copyright 2024-2025 Zbynek Vyskovsky mailto:kvr000@gmail.com http://github.com/kvr000/ https://github.com/kvr000/zbynek-util https://www.linkedin.com/in/zbynek-vyskovsky/
 #
@@ -132,10 +132,13 @@ class DynamoDbCommand(MainSubCommand):
 
 class GetLogCommand(MainSubCommand):
     POLL_INTERVAL_SECONDS = 2
+    # Maximum events returned by a single GetLogEvents call
+    MAX_PAGE_EVENTS = 10000
 
     group: str
     stream: str
     tail: bool = False
+    last: int | None = None
 
     def setup(self, args) -> int | None:
         parser = argparse.ArgumentParser(prog=args[0], description="Retrieve a full CloudWatch log stream, formatted as 'timestamp message' lines")
@@ -143,43 +146,89 @@ class GetLogCommand(MainSubCommand):
         parser.add_argument("stream", type=str, help="CloudWatch log stream name")
         parser.add_argument("-f", "--tail", action="store_true",
                              help="After reaching the end of the stream, keep polling for new events instead of exiting (like tail -f)")
+        parser.add_argument("-n", "--last", type=int, metavar="NUMBER",
+                             help="Print only the last NUMBER events instead of the full stream (like tail -n), can be combined with -f")
 
         parser.parse_args(args[1:], namespace=self)
 
+        if self.last is not None and self.last < 0:
+            parser.error("--last must not be negative")
+
         return None
 
+    def get_log_events(self, extra: list[str]) -> dict:
+        cmd = [
+            "aws", "logs", "get-log-events",
+            "--log-group-name", self.group,
+            "--log-stream-name", self.stream,
+            "--output", "json",
+        ] + extra
+
+        # Force the aws CLI subprocess itself to emit UTF-8 on stdout/stderr, regardless of
+        # the local/system locale. The aws CLI is a Python program: absent this, Python
+        # picks its stdout text encoding from the locale.
+        child_env = {**os.environ, "PYTHONUTF8": "1" ,
+            # "AWS_CLI_OUTPUT_ENCODING": "UTF-8", "AWS_CLI_FILE_ENCODING": "UTF-8",
+        }
+        result = subprocess.run(cmd, capture_output=True, env=child_env)
+        if result.returncode != 0:
+            sys.stderr.buffer.write(result.stderr)
+            raise GetLogCommand.AwsFailed(result.returncode)
+
+        # Decode with surrogateescape rather than strict utf-8: CloudWatch log messages can
+        # contain bytes that are not valid UTF-8 (binary data, a different original encoding,
+        # etc). surrogateescape preserves those bytes losslessly in the string instead of
+        # raising UnicodeDecodeError; print_event() encodes back the same way on output so the
+        # original bytes reach stdout unchanged instead of crashing or being lost.
+        return json.loads(result.stdout.decode("utf-8", errors="surrogateescape"))
+
+    def read_last(self) -> str | None:
+        """
+        Prints the last self.last events and returns the forward token to continue from.
+
+        Without --start-from-head, GetLogEvents returns the newest events, so only the
+        requested tail is downloaded. Requests above one page are completed by paging
+        backward via nextBackwardToken.
+        """
+        remaining = self.last
+        data = self.get_log_events(["--limit", str(max(1, min(remaining, self.MAX_PAGE_EVENTS)))])
+        forward_token = data.get("nextForwardToken")
+        pages: list[list[dict]] = []
+        if remaining > 0:
+            events = data.get("events", [])[-remaining:]
+            pages.append(events)
+            remaining -= len(events)
+            backward_token = data.get("nextBackwardToken")
+            while remaining > 0 and backward_token is not None:
+                data = self.get_log_events([
+                    "--limit", str(min(remaining, self.MAX_PAGE_EVENTS)),
+                    "--next-token", backward_token,
+                ])
+                events = data.get("events", [])[-remaining:]
+                pages.append(events)
+                remaining -= len(events)
+                new_token = data.get("nextBackwardToken")
+                if new_token == backward_token:
+                    # reached the beginning of the stream
+                    break
+                backward_token = new_token
+
+        for events in reversed(pages):
+            for event in events:
+                self.print_event(sys.stdout, event)
+        sys.stdout.flush()
+        return forward_token
+
     def execute(self) -> int:
-        next_token: str | None = None
-
         try:
+            # With --last, continue forward right after the printed tail; otherwise start from head
+            next_token: str | None = self.read_last() if self.last is not None else None
+
             while True:
-                cmd = [
-                    "aws", "logs", "get-log-events",
-                    "--log-group-name", self.group,
-                    "--log-stream-name", self.stream,
-                    "--start-from-head",
-                    "--output", "json",
-                ]
+                extra = ["--start-from-head"]
                 if next_token is not None:
-                    cmd += ["--next-token", next_token]
-
-                # Force the aws CLI subprocess itself to emit UTF-8 on stdout/stderr, regardless of
-                # the local/system locale. The aws CLI is a Python program: absent this, Python
-                # picks its stdout text encoding from the locale.
-                child_env = {**os.environ, "PYTHONUTF8": "1" ,
-                    # "AWS_CLI_OUTPUT_ENCODING": "UTF-8", "AWS_CLI_FILE_ENCODING": "UTF-8",
-                }
-                result = subprocess.run(cmd, capture_output=True, env=child_env)
-                if result.returncode != 0:
-                    sys.stderr.buffer.write(result.stderr)
-                    return result.returncode
-
-                # Decode with surrogateescape rather than strict utf-8: CloudWatch log messages can
-                # contain bytes that are not valid UTF-8 (binary data, a different original encoding,
-                # etc). surrogateescape preserves those bytes losslessly in the string instead of
-                # raising UnicodeDecodeError; print_event() encodes back the same way on output so the
-                # original bytes reach stdout unchanged instead of crashing or being lost.
-                data = json.loads(result.stdout.decode("utf-8", errors="surrogateescape"))
+                    extra += ["--next-token", next_token]
+                data = self.get_log_events(extra)
                 for event in data.get("events", []):
                     self.print_event(sys.stdout, event)
                 sys.stdout.flush()
@@ -191,12 +240,18 @@ class GetLogCommand(MainSubCommand):
                 if caught_up:
                     if not self.tail:
                         break
-                    sys.stdout.flush()
                     time.sleep(self.POLL_INTERVAL_SECONDS)
+        except GetLogCommand.AwsFailed as ex:
+            return ex.returncode
         except KeyboardInterrupt:
             return 130
 
         return 0
+
+    class AwsFailed(Exception):
+        def __init__(self, returncode: int):
+            super().__init__(f"aws failed with exit code {returncode}")
+            self.returncode = returncode
 
     @staticmethod
     def print_event(fd: TextIO, event: dict) -> None:

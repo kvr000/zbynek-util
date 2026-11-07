@@ -7,6 +7,7 @@
 #   git-revert-mod: reverts unintended file mode (executable bit) changes from recent commits
 #   git-prune-merged: deletes local branches already merged into the given branches
 #   keep-sync: keeps destination directory in sync with source, watching for changes (inotify or similar)
+#   colorcmd: runs a command with its output in given color, resetting the color after it exits
 #
 # Copyright 2024-2025 Zbynek Vyskovsky mailto:kvr000@gmail.com http://github.com/kvr000/ https://github.com/kvr000/zbynek-util https://www.linkedin.com/in/zbynek-vyskovsky/
 #
@@ -1093,6 +1094,92 @@ class KeepSyncCommand(MainSubCommand):
             os.unlink(dst)
 
 
+class ColorizeCommand(MainSubCommand):
+    """
+    Runs a command with the terminal switched to given foreground color: emits the color escape
+    sequence to stdout, runs the command (inheriting stdin, stdout and stderr) and emits the reset
+    sequence once the command exits (also on failure or interrupt). Exits with the command's exit
+    code.
+
+    The color can be a name (black, red, green, yellow, blue, magenta, cyan, white, gray), a name
+    prefixed with "bright-", a 256-color palette index (0-255), or a #rrggbb true color value.
+    Note that the command itself can change or reset the color (e.g. "ls --color"), the color
+    applies to its uncolored output only.
+    """
+
+    COLORS = {
+        "black": 30,
+        "red": 31,
+        "green": 32,
+        "yellow": 33,
+        "blue": 34,
+        "magenta": 35,
+        "cyan": 36,
+        "white": 37,
+        "gray": 90,
+        "grey": 90,
+    }
+    RESET = "\033[0m"
+
+    color: str
+    command: list[str] = []
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.main = parent
+
+    @classmethod
+    def color_sequence(cls, color: str) -> str:
+        spec = color.strip().lower()
+        if spec in cls.COLORS:
+            return f"\033[{cls.COLORS[spec]}m"
+        if spec.startswith("bright-") and spec[len("bright-"):] in cls.COLORS:
+            code = cls.COLORS[spec[len("bright-"):]]
+            return f"\033[{code + 60 if code < 90 else code}m"
+        if spec.isdigit() and 0 <= int(spec) <= 255:
+            return f"\033[38;5;{int(spec)}m"
+        if m := re.fullmatch(r'#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})', spec):
+            r, g, b = (int(x, 16) for x in m.groups())
+            return f"\033[38;2;{r};{g};{b}m"
+        raise ValueError(f"unsupported color: {color}, expected one of {', '.join(cls.COLORS)}, bright-<name>, 0-255 or #rrggbb")
+
+    def setup(self, args) -> int | None:
+        parser = argparse.ArgumentParser(prog=args[0], description="Run command with its output in given color, resetting the color after the command exits")
+        parser.add_argument("-c", "--color", required=True, help="color: name (red, green, ...), bright-<name>, 256-color index 0-255 or #rrggbb")
+        parser.add_argument("command", nargs=argparse.REMAINDER, help="command and its arguments to run, can be preceded by -- separator")
+
+        parser.parse_args(args[1:], namespace=self)
+
+        if self.command and self.command[0] == "--":
+            self.command = self.command[1:]
+        if not self.command:
+            parser.error("command is required")
+        try:
+            self.sequence = self.color_sequence(self.color)
+        except ValueError as e:
+            parser.error(str(e))
+
+        return None
+
+    def execute(self) -> int:
+        if os.name == "nt":
+            # enables ANSI escape sequence processing in Windows console
+            os.system("")
+        sys.stdout.write(self.sequence)
+        sys.stdout.flush()
+        try:
+            try:
+                return subprocess.call(self.command)
+            except KeyboardInterrupt:
+                return 130
+            except OSError as e:
+                print(f"error: failed to run {self.command[0]}: {e}", file=sys.stderr)
+                return 127
+        finally:
+            sys.stdout.write(self.RESET)
+            sys.stdout.flush()
+
+
 class Main(Command):
     command: Command | None = None
     subcommand: list[str] = []
@@ -1117,8 +1204,10 @@ class Main(Command):
             self.command = GitPruneMergedCommand(self)
         elif self.subcommand[0] == 'keep-sync':
             self.command = KeepSyncCommand(self)
+        elif self.subcommand[0] == 'colorize':
+            self.command = ColorizeCommand(self)
         else:
-            print("Supported subcommands: spotless-to-diff, log-to-timestamp, git-revert-mod, git-prune-merged, keep-sync", file=sys.stderr)
+            print("Supported subcommands: spotless-to-diff, log-to-timestamp, git-revert-mod, git-prune-merged, keep-sync, colorcmd", file=sys.stderr)
             return 122
 
         self.subcommand[0] = args[0] + " " + self.subcommand[0]

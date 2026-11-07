@@ -11,12 +11,12 @@ fi
 HISTSIZE=1000
 HISTCONTROL=ignoreboth
 
-case "`ps -p $$`" in
-*zsh)
+case $SHELL in
+*/zsh)
 	[ ! -f /opt/homebrew/share/antigen/antigen.zsh ] || source /opt/homebrew/share/antigen/antigen.zsh
 	! type antigen >/dev/null || antigen bundle zsh-users/zsh-completions
 	;;
-*bash)
+*/bash)
 	[ ! -f /etc/skel/.bashrc ] || . /etc/skel/.bashrc
 	;;
 esac
@@ -66,3 +66,16 @@ alias iks='startx --'
 alias iksa='(startx --&)>/dev/null 2>&1'
 alias se='slovnik -e'
 alias sc='slovnik -c'
+
+suffix='$ '
+[ `id -u` -ne 0 ] || suffix='# '
+case $SHELL in
+	*/zsh)
+		export PS1='%n@%m:%~$ '
+		;;
+
+	*)
+		export PS1='\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]'$suffix
+		;;
+		
+esac

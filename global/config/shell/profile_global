@@ -21,14 +21,3 @@ if which nvim >/dev/null 2>&1; then
 elif which vim >/dev/null 2>&1; then
 	export EDITOR=vim
 fi
-
-case $SHELL in
-	*/zsh)
-		export PS1='%n@%m:%~$ '
-		;;
-
-	*)
-		export PS1='\u@\h:\w$ '
-		;;
-		
-esac

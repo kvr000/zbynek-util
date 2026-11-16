@@ -537,7 +537,11 @@ if has("gui_running") || has("nvim")
 	hi Search guibg=#606060 guifg=NONE
 	set titlestring=%F%r\ -\ VIM
 	set background=dark
-	colorscheme default
+	try
+		colorscheme vim
+	catch
+		colorscheme default
+	endtry
 	syntax on
 else
 	set background=dark

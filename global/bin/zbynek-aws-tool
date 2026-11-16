@@ -6,6 +6,9 @@
 #   dynamodb convert: converts DynamoDb type based output to simple JSON
 #   get-log: retrieves a full CloudWatch log stream, formatted as "<UTC timestamp> <message>" lines
 #             (--tail to keep polling for new events, like tail -f; --last N to start with only the last N events)
+#   cloudformation remove-part: removes resources from a CloudFormation stack, keeping the physical resources by default
+#              (sets DeletionPolicy: Retain, then removes them from the template; --delete to delete them too;
+#              --dry-run to preview)
 #
 # Copyright 2024-2025 Zbynek Vyskovsky mailto:kvr000@gmail.com http://github.com/kvr000/ https://github.com/kvr000/zbynek-util https://www.linkedin.com/in/zbynek-vyskovsky/
 #
@@ -32,6 +35,9 @@ import argparse
 import subprocess
 import os
 import time
+import copy
+import re
+import uuid
 from datetime import datetime, timezone
 from typing import TextIO
 
@@ -266,6 +272,370 @@ class GetLogCommand(MainSubCommand):
         fd.buffer.write(line.encode("utf-8", errors="surrogateescape"))
 
 
+class CloudFormationRemovePartCommand(MainSubCommand):
+    """
+    Removes resources from a CloudFormation stack WITHOUT deleting the underlying physical resources.
+
+    CloudFormation has no direct "forget this resource" operation, so this follows the documented
+    two-step procedure:
+      1. update the stack with DeletionPolicy: Retain on the resources to remove,
+      2. update the stack again with the resources deleted from the template
+         (the retained physical resources are left alone and become unmanaged).
+    """
+
+    # TemplateBody size limit of CloudFormation when the template is not uploaded to S3
+    MAX_TEMPLATE_BYTES = 51200
+    STABLE_STATUSES = {
+        "CREATE_COMPLETE", "UPDATE_COMPLETE", "UPDATE_ROLLBACK_COMPLETE",
+        "IMPORT_COMPLETE", "IMPORT_ROLLBACK_COMPLETE",
+    }
+
+    stack: str
+    resources: list[str]
+    profile: str | None = None
+    region: str | None = None
+    dry_run: bool = False
+    yes: bool = False
+    delete: bool = False
+    s3_bucket: str | None = None
+
+    def setup(self, args) -> int | None:
+        parser = argparse.ArgumentParser(
+            prog=args[0],
+            description="Remove resources from a CloudFormation stack, by default keeping the physical resources "
+                        "(sets DeletionPolicy: Retain, then removes the resources from the template); "
+                        "with --delete the physical resources are deleted too")
+        parser.add_argument("stack", type=str, help="CloudFormation stack name or ID")
+        parser.add_argument("resources", type=str, nargs="+", metavar="logical-id",
+                             help="Logical ID of the resource to remove from the stack")
+        parser.add_argument("--profile", type=str, help="AWS CLI profile")
+        parser.add_argument("--region", type=str, help="AWS region")
+        parser.add_argument("-d", "--delete", action="store_true",
+                             help="Delete the physical resources too (a Retain DeletionPolicy is overridden; "
+                                  "Snapshot is still honoured)")
+        parser.add_argument("--s3-bucket", type=str, metavar="BUCKET",
+                             help="S3 bucket to temporarily upload the template to when it exceeds the "
+                                  "51200 bytes limit of direct upload (the uploaded object is deleted afterwards)")
+        parser.add_argument("-n", "--dry-run", action="store_true",
+                             help="Only show what would be done")
+        parser.add_argument("-y", "--yes", action="store_true",
+                             help="Do not ask for confirmation")
+
+        parser.parse_args(args[1:], namespace=self)
+        return None
+
+    class AwsFailed(Exception):
+        def __init__(self, returncode: int, stderr: str):
+            super().__init__(f"aws failed with exit code {returncode}: {stderr.strip()}")
+            self.returncode = returncode
+            self.stderr = stderr
+
+    def aws(self, args: list[str]) -> str:
+        cmd = ["aws"]
+        if self.profile:
+            cmd += ["--profile", self.profile]
+        if self.region:
+            cmd += ["--region", self.region]
+        cmd += args
+        result = subprocess.run(cmd, capture_output=True, env={**os.environ, "PYTHONUTF8": "1"})
+        stdout = result.stdout.decode("utf-8", errors="replace")
+        if result.returncode != 0:
+            raise CloudFormationRemovePartCommand.AwsFailed(result.returncode, result.stderr.decode("utf-8", errors="replace"))
+        return stdout
+
+    @staticmethod
+    def load_yaml(text: str):
+        import yaml
+
+        class CfnTag:
+            def __init__(self, tag, value):
+                self.tag = tag
+                self.value = value
+
+        class Loader(yaml.SafeLoader):
+            pass
+
+        def construct_tag(loader, suffix, node):
+            if isinstance(node, yaml.ScalarNode):
+                value = loader.construct_scalar(node)
+            elif isinstance(node, yaml.SequenceNode):
+                value = loader.construct_sequence(node, deep=True)
+            else:
+                value = loader.construct_mapping(node, deep=True)
+            return CfnTag("!" + suffix, value)
+
+        Loader.add_multi_constructor("!", construct_tag)
+
+        def represent_tag(dumper, data):
+            if isinstance(data.value, dict):
+                return dumper.represent_mapping(data.tag, data.value)
+            elif isinstance(data.value, list):
+                return dumper.represent_sequence(data.tag, data.value)
+            return dumper.represent_scalar(data.tag, data.value)
+
+        class Dumper(yaml.SafeDumper):
+            pass
+
+        Dumper.add_representer(CfnTag, represent_tag)
+
+        return yaml.load(text, Loader=Loader), lambda t: yaml.dump(t, Dumper=Dumper, default_flow_style=False, sort_keys=False)
+
+    def load_template(self, stack_id: str):
+        """Returns (template dict, serializer function)."""
+        body = json.loads(self.aws([
+            "cloudformation", "get-template", "--stack-name", stack_id,
+            "--template-stage", "Original", "--output", "json"]))["TemplateBody"]
+        if isinstance(body, dict):
+            return body, lambda t: json.dumps(t, indent=2)
+        try:
+            return json.loads(body), lambda t: json.dumps(t, indent=2)
+        except ValueError:
+            pass
+        try:
+            return self.load_yaml(body)
+        except ImportError:
+            raise SystemExit("YAML template requires PyYAML: pip install pyyaml")
+
+    def update_stack(self, stack: dict, template_text: str) -> bool:
+        """Returns False if CloudFormation found nothing to update."""
+        if len(template_text.encode("utf-8")) > self.MAX_TEMPLATE_BYTES:
+            try:
+                # JSON can be shrunk by dropping the indentation
+                template_text = json.dumps(json.loads(template_text), separators=(",", ":"))
+            except ValueError:
+                pass
+        use_s3 = len(template_text.encode("utf-8")) > self.MAX_TEMPLATE_BYTES
+        if use_s3 and not self.s3_bucket:
+            raise SystemExit(f"Template exceeds {self.MAX_TEMPLATE_BYTES} bytes, specify --s3-bucket BUCKET to upload it via S3")
+        stack_id = stack["StackId"]
+        s3_uri = None
+        # Use a file in the current directory with a relative path, not the system temp directory:
+        # under Cygwin, /tmp/... is not resolvable by the native Windows aws CLI.
+        path = f".zbynek-aws-tool-{uuid.uuid4()}.template"
+        try:
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(template_text)
+            if use_s3:
+                key = f"zbynek-aws-tool/cf-remove/{uuid.uuid4()}.template"
+                s3_uri = f"s3://{self.s3_bucket}/{key}"
+                self.aws(["s3", "cp", path, s3_uri, "--only-show-errors"])
+                # arn:aws:cloudformation:<region>:<account>:stack/<name>/<id>
+                region = self.region or stack_id.split(":")[3]
+                template_arg = ["--template-url", f"https://{self.s3_bucket}.s3.{region}.amazonaws.com/{key}"]
+            else:
+                template_arg = ["--template-body", "file://" + path]
+            cmd = ["cloudformation", "update-stack", "--stack-name", stack_id] + template_arg
+            parameters = [p["ParameterKey"] for p in stack.get("Parameters", [])]
+            if parameters:
+                cmd += ["--parameters"] + [f"ParameterKey={k},UsePreviousValue=true" for k in parameters]
+            if stack.get("Capabilities"):
+                cmd += ["--capabilities"] + stack["Capabilities"]
+            try:
+                self.aws(cmd)
+            except CloudFormationRemovePartCommand.AwsFailed as ex:
+                if "No updates are to be performed" in ex.stderr:
+                    return False
+                raise
+            finally:
+                if s3_uri is not None:
+                    try:
+                        self.aws(["s3", "rm", s3_uri, "--only-show-errors"])
+                    except CloudFormationRemovePartCommand.AwsFailed as ex:
+                        print(f"Failed to delete {s3_uri}: {ex.stderr.strip()}", file=sys.stderr)
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        print("  waiting for stack update to complete...", file=sys.stderr)
+        self.aws(["cloudformation", "wait", "stack-update-complete", "--stack-name", stack_id])
+        return True
+
+    SUB_REF = re.compile(r"\$\{([A-Za-z0-9]+)(?:\.[^}]*)?\}")
+
+    @staticmethod
+    def find_references(node, names: set[str]) -> set[str]:
+        """Finds references (Ref, GetAtt, Sub, in both long and YAML short forms) to the given logical names."""
+        found: set[str] = set()
+
+        def sub_string(text):
+            if isinstance(text, str):
+                found.update(n for n in CloudFormationRemovePartCommand.SUB_REF.findall(text) if n in names)
+
+        def walk(n):
+            if isinstance(n, dict):
+                for k, v in n.items():
+                    if k == "Ref" and isinstance(v, str):
+                        if v in names:
+                            found.add(v)
+                    elif k == "Fn::GetAtt":
+                        target = v[0] if isinstance(v, list) and v else v
+                        if isinstance(target, str) and target.split(".")[0] in names:
+                            found.add(target.split(".")[0])
+                    elif k == "Fn::Sub":
+                        sub_string(v[0] if isinstance(v, list) and v else v)
+                    walk(v)
+            elif isinstance(n, list):
+                for v in n:
+                    walk(v)
+            elif hasattr(n, "tag") and hasattr(n, "value"):
+                v = n.value
+                if n.tag == "!Ref" and isinstance(v, str):
+                    if v in names:
+                        found.add(v)
+                elif n.tag == "!GetAtt":
+                    target = v[0] if isinstance(v, list) and v else v
+                    if isinstance(target, str) and target.split(".")[0] in names:
+                        found.add(target.split(".")[0])
+                elif n.tag == "!Sub":
+                    sub_string(v[0] if isinstance(v, list) and v else v)
+                walk(v)
+
+        walk(node)
+        return found
+
+    @staticmethod
+    def strip_dependencies(template: dict, removed: set[str]) -> None:
+        for resource in template["Resources"].values():
+            depends = resource.get("DependsOn")
+            if depends is None:
+                continue
+            if isinstance(depends, str):
+                if depends in removed:
+                    del resource["DependsOn"]
+            else:
+                remaining = [d for d in depends if d not in removed]
+                if remaining:
+                    resource["DependsOn"] = remaining
+                else:
+                    del resource["DependsOn"]
+
+    def execute(self) -> int:
+        try:
+            return self.do_execute()
+        except CloudFormationRemovePartCommand.AwsFailed as ex:
+            sys.stderr.write(ex.stderr)
+            return ex.returncode
+        except KeyboardInterrupt:
+            return 130
+
+    def do_execute(self) -> int:
+        stack = json.loads(self.aws([
+            "cloudformation", "describe-stacks", "--stack-name", self.stack, "--output", "json"]))["Stacks"][0]
+        stack_id = stack["StackId"]
+        if stack["StackStatus"] not in self.STABLE_STATUSES:
+            print(f"Stack {self.stack} is in status {stack['StackStatus']}, which does not allow update", file=sys.stderr)
+            return 1
+
+        template, serialize = self.load_template(stack_id)
+        template_resources = template.get("Resources", {})
+        removed = list(dict.fromkeys(self.resources))
+        missing = [r for r in removed if r not in template_resources]
+        if missing:
+            print(f"Resources not found in stack template: {', '.join(missing)}", file=sys.stderr)
+            print(f"Available: {', '.join(template_resources)}", file=sys.stderr)
+            return 1
+
+        # CloudFormation rejects the update if anything remaining still refers to a removed resource
+        removed_set = set(removed)
+        dangling = []
+        for section, content in template.items():
+            if not isinstance(content, dict):
+                continue
+            for name, value in content.items():
+                if section == "Resources" and name in removed_set:
+                    continue
+                refs = self.find_references(value, removed_set)
+                if refs:
+                    dangling.append(f"  {section}.{name} references {', '.join(sorted(refs))}")
+        if dangling:
+            print("Cannot remove, the following still reference the removed resources:", file=sys.stderr)
+            print("\n".join(dangling), file=sys.stderr)
+            print("Remove the referencing resources too (add them to the command), or edit the stack template first",
+                  file=sys.stderr)
+            return 1
+
+        physical = {r["LogicalResourceId"]: r for r in json.loads(self.aws([
+            "cloudformation", "describe-stack-resources", "--stack-name", stack_id,
+            "--output", "json"]))["StackResources"]}
+
+        print(f"Stack {stack['StackName']} ({stack['StackStatus']}): removing, physical resources are "
+              + ("DELETED:" if self.delete else "kept:"))
+        for logical in removed:
+            info = physical.get(logical, {})
+            print(f"  {logical}  {info.get('ResourceType', '?')}  {info.get('PhysicalResourceId', '?')}"
+                  f"  (DeletionPolicy: {template_resources[logical].get('DeletionPolicy', 'Delete')})")
+        if self.dry_run:
+            return 0
+        if not self.yes:
+            if input("Proceed" + (" and DELETE the physical resources" if self.delete else "") + "? [y/N] ").strip().lower() not in ("y", "yes"):
+                print("Aborted", file=sys.stderr)
+                return 1
+
+        if self.delete:
+            # Step 1: make sure the physical resources do get deleted along with the removal
+            to_unretain = [r for r in removed if template_resources[r].get("DeletionPolicy") == "Retain"]
+            if to_unretain:
+                print(f"Step 1/2: clearing DeletionPolicy: Retain on {', '.join(to_unretain)}", file=sys.stderr)
+                unretained = copy.deepcopy(template)
+                for logical in to_unretain:
+                    del unretained["Resources"][logical]["DeletionPolicy"]
+                self.update_stack(stack, serialize(unretained))
+            else:
+                print("Step 1/2: nothing to change, no resource has DeletionPolicy: Retain", file=sys.stderr)
+            to_retain = []
+        else:
+            # Step 1: make sure the physical resources survive the removal
+            to_retain = [r for r in removed if template_resources[r].get("DeletionPolicy") != "Retain"]
+        if to_retain:
+            print(f"Step 1/2: setting DeletionPolicy: Retain on {', '.join(to_retain)}", file=sys.stderr)
+            retained = copy.deepcopy(template)
+            for logical in to_retain:
+                retained["Resources"][logical]["DeletionPolicy"] = "Retain"
+            self.update_stack(stack, serialize(retained))
+        elif not self.delete:
+            print("Step 1/2: all resources already have DeletionPolicy: Retain", file=sys.stderr)
+
+        # Step 2: remove the resources from the stack
+        print(f"Step 2/2: removing {', '.join(removed)} from the template", file=sys.stderr)
+        reduced = copy.deepcopy(template)
+        for logical in removed:
+            del reduced["Resources"][logical]
+        self.strip_dependencies(reduced, set(removed))
+        self.update_stack(stack, serialize(reduced))
+
+        print("Done, the following physical resources were deleted:" if self.delete
+              else "Done, the following physical resources are now unmanaged:")
+        for logical in removed:
+            info = physical.get(logical, {})
+            print(f"  {info.get('ResourceType', '?')}  {info.get('PhysicalResourceId', '?')}")
+        return 0
+
+
+class CloudFormationCommand(MainSubCommand):
+    command: Command | None = None
+    subcommand: list[str] = []
+
+    def setup(self, args) -> int | None:
+        parser = argparse.ArgumentParser(prog=args[0], description="CloudFormation utilities")
+        parser.add_argument("subcommand", type=str, nargs=argparse.REMAINDER)
+
+        parser.parse_args(args[1:], namespace=self)
+
+        if len(self.subcommand) < 1:
+            print(f"usage: {args[0]} subcommand ...", file=sys.stderr)
+            return 122
+
+        if self.subcommand[0] == 'remove-part':
+            self.command = CloudFormationRemovePartCommand(self)
+        else:
+            print("Supported subcommands: remove-part", file=sys.stderr)
+            return 122
+
+        self.subcommand[0] = args[0] + " " + self.subcommand[0]
+        return self.command.run(self.subcommand)
+
+
 class Main(Command):
     command: Command | None = None
     subcommand: list[str] = []
@@ -284,8 +654,10 @@ class Main(Command):
             self.command = DynamoDbCommand(self)
         elif self.subcommand[0] == 'get-log':
             self.command = GetLogCommand(self)
+        elif self.subcommand[0] == 'cloud-formation' or self.subcommand[0] == 'cloudformation':
+            self.command = CloudFormationCommand(self)
         else:
-            print("Supported subcommands: dynamodb get-log", file=sys.stderr)
+            print("Supported subcommands: dynamodb get-log cloud-formation", file=sys.stderr)
             return 122
 
         self.subcommand[0] = args[0] + " " + self.subcommand[0]

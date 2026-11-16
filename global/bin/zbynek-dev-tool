@@ -7,7 +7,8 @@
 #   git-revert-mod: reverts unintended file mode (executable bit) changes from recent commits
 #   git-prune-merged: deletes local branches already merged into the given branches
 #   keep-sync: keeps destination directory in sync with source, watching for changes (inotify or similar)
-#   colorcmd: runs a command with its output in given color, resetting the color after it exits
+#   colorize: runs a command with its output in given color, resetting the color after it exits
+#   parallel: runs commands read from input in parallel, prefixing their output with the command tag
 #
 # Copyright 2024-2025 Zbynek Vyskovsky mailto:kvr000@gmail.com http://github.com/kvr000/ https://github.com/kvr000/zbynek-util https://www.linkedin.com/in/zbynek-vyskovsky/
 #
@@ -41,6 +42,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 
@@ -1180,6 +1182,188 @@ class ColorizeCommand(MainSubCommand):
             sys.stdout.flush()
 
 
+class ParallelCommand(MainSubCommand):
+    """
+    Runs commands read from input in parallel, similar to GNU parallel, but with an explicit tag
+    per command, so the interleaved output can be told apart.
+
+    Every non-blank input line has the form "<tag> <command...>": the first whitespace-delimited
+    item is the command tag and the rest of the line is the command, executed by the shell (so
+    pipes, redirects and quoting work). Blank lines and lines starting with "#" are ignored.
+    Commands run with stdin closed.
+
+    Every line of the command's stdout is forwarded to our stdout and every line of its stderr to
+    our stderr, each prefixed with the tag and a separator (a single space by default, see --separator). Lines are written atomically, so they never get
+    mixed within a line. At most --jobs commands run at once; 0 (the default) means number of CPUs.
+
+    A failed command is reported on stderr (a "=== tag failed with exit code N: command" line) as
+    soon as it finishes. With --errors, once all the commands have finished, every failure is
+    reported again, followed by its output (in input order), so failures are not lost in the output
+    of a long run.
+
+    Exits with the highest exit code of the commands (a command killed by a signal counts as
+    128+signal, a command which could not be started as 127), or at least 1 if any input line
+    was invalid.
+    """
+
+    inputs: list[str] = []
+    jobs: int = 0
+    errors: bool = False
+    separator: str = " "
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.main = parent
+        self.output_lock = threading.Lock()
+        self.processes: set[subprocess.Popen] = set()
+        self.processes_lock = threading.Lock()
+        self.interrupted = threading.Event()
+
+    def setup(self, args) -> int | None:
+        parser = argparse.ArgumentParser(prog=args[0], description="Run commands read from input in parallel, prefixing their output with the command tag")
+        parser.add_argument("inputs", nargs="*", metavar="input", help="files to read the commands from, - for stdin (default stdin); each line is: <tag> <command...>")
+        parser.add_argument("-n", "--jobs", type=int, default=0, help="maximum number of commands running in parallel, 0 means number of CPUs (default 0)")
+        parser.add_argument("-s", "--separator", default=" ", help="separator printed between the tag and the output line (default a single space)")
+        parser.add_argument("-e", "--errors", action="store_true", help="after all commands finished, report the failed commands again, with their output")
+
+        parser.parse_args(args[1:], namespace=self)
+
+        if self.jobs < 0:
+            parser.error("--jobs must not be negative")
+        if self.jobs == 0:
+            self.jobs = os.cpu_count() or 1
+        if not self.inputs:
+            self.inputs = ["-"]
+
+        return None
+
+    def read_commands(self) -> tuple[list[tuple[str, str]], bool]:
+        commands: list[tuple[str, str]] = []
+        valid = True
+        for name in self.inputs:
+            stream = sys.stdin if name == "-" else open(name, encoding="utf-8", errors="replace")
+            try:
+                for lineno, line in enumerate(stream, 1):
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#"):
+                        continue
+                    parts = stripped.split(None, 1)
+                    if len(parts) < 2:
+                        print(f"error: {'<stdin>' if name == '-' else name}:{lineno}: missing command after tag: {parts[0]}", file=sys.stderr)
+                        valid = False
+                        continue
+                    commands.append((parts[0], parts[1]))
+            finally:
+                if stream is not sys.stdin:
+                    stream.close()
+        return commands, valid
+
+    def execute(self) -> int:
+        try:
+            commands, valid = self.read_commands()
+        except OSError as e:
+            print(f"error: cannot read input: {e}", file=sys.stderr)
+            return 1
+
+        results: list[tuple[int, list[tuple[bool, bytes]]] | None] = [None] * len(commands)
+        pending: queue.Queue = queue.Queue()
+        for index, (tag, command) in enumerate(commands):
+            pending.put(index)
+
+        def worker() -> None:
+            while not self.interrupted.is_set():
+                try:
+                    index = pending.get_nowait()
+                except queue.Empty:
+                    return
+                tag, command = commands[index]
+                results[index] = self.run_one(tag, command)
+                if results[index][0] != 0:
+                    self.report_failure(tag, command, results[index][0])
+
+        threads = [threading.Thread(target=worker, daemon=True) for _ in range(min(self.jobs, len(commands)))]
+        for thread in threads:
+            thread.start()
+        try:
+            for thread in threads:
+                # timeout keeps the main thread interruptible on Windows
+                while thread.is_alive():
+                    thread.join(0.5)
+        except KeyboardInterrupt:
+            self.interrupted.set()
+            with self.processes_lock:
+                for process in self.processes:
+                    try:
+                        process.terminate()
+                    except OSError:
+                        pass
+            for thread in threads:
+                thread.join()
+            return 130
+
+        exit_code = 0 if valid else 1
+        for result in results:
+            if result is not None:
+                exit_code = max(exit_code, result[0])
+
+        if self.errors:
+            for (tag, command), result in zip(commands, results):
+                if result is None or result[0] == 0:
+                    continue
+                self.report_failure(tag, command, result[0])
+                for is_stderr, line in result[1]:
+                    self.write_prefixed(tag, is_stderr, line)
+
+        return exit_code
+
+    def report_failure(self, tag: str, command: str, code: int) -> None:
+        self.write(True, f"=== {tag} failed with exit code {code}: {command}\n".encode())
+
+    def write(self, is_stderr: bool, data: bytes) -> None:
+        stream = sys.stderr.buffer if is_stderr else sys.stdout.buffer
+        with self.output_lock:
+            stream.write(data)
+            stream.flush()
+
+    def write_prefixed(self, tag: str, is_stderr: bool, line: bytes) -> None:
+        if not line.endswith(b"\n"):
+            line += b"\n"
+        self.write(is_stderr, tag.encode() + self.separator.encode() + line)
+
+    def run_one(self, tag: str, command: str) -> tuple[int, list[tuple[bool, bytes]]]:
+        saved: list[tuple[bool, bytes]] = []
+
+        def pump(pipe, is_stderr: bool) -> None:
+            for line in iter(pipe.readline, b""):
+                self.write_prefixed(tag, is_stderr, line)
+                if self.errors:
+                    saved.append((is_stderr, line if line.endswith(b"\n") else line + b"\n"))
+            pipe.close()
+
+        try:
+            process = subprocess.Popen(command, shell=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except OSError as e:
+            message = f"failed to start command: {e}\n".encode()
+            self.write_prefixed(tag, True, message)
+            return 127, [(True, message)]
+
+        with self.processes_lock:
+            self.processes.add(process)
+        readers = [threading.Thread(target=pump, args=(process.stdout, False), daemon=True),
+                   threading.Thread(target=pump, args=(process.stderr, True), daemon=True)]
+        for reader in readers:
+            reader.start()
+        code = process.wait()
+        for reader in readers:
+            reader.join()
+        with self.processes_lock:
+            self.processes.discard(process)
+
+        if code < 0:
+            code = 128 - code
+        return min(code, 255), saved
+
+
 class Main(Command):
     command: Command | None = None
     subcommand: list[str] = []
@@ -1206,8 +1390,10 @@ class Main(Command):
             self.command = KeepSyncCommand(self)
         elif self.subcommand[0] == 'colorize':
             self.command = ColorizeCommand(self)
+        elif self.subcommand[0] == 'parallel':
+            self.command = ParallelCommand(self)
         else:
-            print("Supported subcommands: spotless-to-diff, log-to-timestamp, git-revert-mod, git-prune-merged, keep-sync, colorcmd", file=sys.stderr)
+            print("Supported subcommands: spotless-to-diff, log-to-timestamp, git-revert-mod, git-prune-merged, keep-sync, colorize, parallel", file=sys.stderr)
             return 122
 
         self.subcommand[0] = args[0] + " " + self.subcommand[0]

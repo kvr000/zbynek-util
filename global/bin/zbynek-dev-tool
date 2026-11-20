@@ -1196,10 +1196,15 @@ class ParallelCommand(MainSubCommand):
     our stderr, each prefixed with the tag and a separator (a single space by default, see --separator). Lines are written atomically, so they never get
     mixed within a line. At most --jobs commands run at once; 0 (the default) means number of CPUs.
 
-    A failed command is reported on stderr (a "=== tag failed with exit code N: command" line) as
-    soon as it finishes. With --errors, once all the commands have finished, every failure is
-    reported again, followed by its output (in input order), so failures are not lost in the output
-    of a long run.
+    The status of every command is always reported on stderr right after it finishes (after all its
+    output): a "=== tag succeeded: command" line in blue, or a
+    "=== tag failed with exit code N: command" line in red. These lines are always colored. With
+    --errors, once all the commands have finished, the output of every failed
+    command is repeated (in input order), followed by its failure line again, so failures are not
+    lost in the output of a long run.
+
+    With --color, only the tag prefix of every output line is colored, using a color specific to
+    the command (distinguishable colors, never green, white, blue or red).
 
     Exits with the highest exit code of the commands (a command killed by a signal counts as
     128+signal, a command which could not be started as 127), or at least 1 if any input line
@@ -1209,7 +1214,20 @@ class ParallelCommand(MainSubCommand):
     inputs: list[str] = []
     jobs: int = 0
     errors: bool = False
+    color: bool = False
     separator: str = " "
+
+    # Tag colors (SGR parameters) chosen to be well visible on dark and light backgrounds; green,
+    # white (default text colors), blue (success) and red (failure) are deliberately absent.
+    TAG_COLORS = [
+        # bright colors first: yellow, magenta, cyan, orange, light purple
+        "95", "96", "38;5;208", "38;5;141", "93",
+        # then their dark counterparts, so similar hues are as far apart as possible
+        "35", "36", "38;5;130", "38;5;91", "33",
+    ]
+    SUCCESS_COLOR = "34"
+    FAILURE_COLOR = "31"
+    RESET = "\033[0m"
 
     def __init__(self, parent):
         super().__init__(parent)
@@ -1224,6 +1242,7 @@ class ParallelCommand(MainSubCommand):
         parser.add_argument("inputs", nargs="*", metavar="input", help="files to read the commands from, - for stdin (default stdin); each line is: <tag> <command...>")
         parser.add_argument("-n", "--jobs", type=int, default=0, help="maximum number of commands running in parallel, 0 means number of CPUs (default 0)")
         parser.add_argument("-s", "--separator", default=" ", help="separator printed between the tag and the output line (default a single space)")
+        parser.add_argument("-c", "--color", action="store_true", help="color the tag of each output line, each command with its own color")
         parser.add_argument("-e", "--errors", action="store_true", help="after all commands finished, report the failed commands again, with their output")
 
         parser.parse_args(args[1:], namespace=self)
@@ -1265,6 +1284,7 @@ class ParallelCommand(MainSubCommand):
             print(f"error: cannot read input: {e}", file=sys.stderr)
             return 1
 
+        self.tag_colors = {index: self.TAG_COLORS[index % len(self.TAG_COLORS)] for index in range(len(commands))}
         results: list[tuple[int, list[tuple[bool, bytes]]] | None] = [None] * len(commands)
         pending: queue.Queue = queue.Queue()
         for index, (tag, command) in enumerate(commands):
@@ -1277,9 +1297,11 @@ class ParallelCommand(MainSubCommand):
                 except queue.Empty:
                     return
                 tag, command = commands[index]
-                results[index] = self.run_one(tag, command)
+                results[index] = self.run_one(index, tag, command)
                 if results[index][0] != 0:
                     self.report_failure(tag, command, results[index][0])
+                else:
+                    self.report_success(tag, command)
 
         threads = [threading.Thread(target=worker, daemon=True) for _ in range(min(self.jobs, len(commands)))]
         for thread in threads:
@@ -1307,17 +1329,20 @@ class ParallelCommand(MainSubCommand):
                 exit_code = max(exit_code, result[0])
 
         if self.errors:
-            for (tag, command), result in zip(commands, results):
+            for index, ((tag, command), result) in enumerate(zip(commands, results)):
                 if result is None or result[0] == 0:
                     continue
-                self.report_failure(tag, command, result[0])
                 for is_stderr, line in result[1]:
-                    self.write_prefixed(tag, is_stderr, line)
+                    self.write_prefixed(index, tag, is_stderr, line)
+                self.report_failure(tag, command, result[0])
 
         return exit_code
 
     def report_failure(self, tag: str, command: str, code: int) -> None:
-        self.write(True, f"=== {tag} failed with exit code {code}: {command}\n".encode())
+        self.write(True, f"\033[{self.FAILURE_COLOR}m=== {tag} failed with exit code {code}: {command}{self.RESET}\n".encode())
+
+    def report_success(self, tag: str, command: str) -> None:
+        self.write(True, f"\033[{self.SUCCESS_COLOR}m=== {tag} succeeded: {command}{self.RESET}\n".encode())
 
     def write(self, is_stderr: bool, data: bytes) -> None:
         stream = sys.stderr.buffer if is_stderr else sys.stdout.buffer
@@ -1325,17 +1350,20 @@ class ParallelCommand(MainSubCommand):
             stream.write(data)
             stream.flush()
 
-    def write_prefixed(self, tag: str, is_stderr: bool, line: bytes) -> None:
+    def write_prefixed(self, index: int, tag: str, is_stderr: bool, line: bytes) -> None:
         if not line.endswith(b"\n"):
             line += b"\n"
-        self.write(is_stderr, tag.encode() + self.separator.encode() + line)
+        prefix = tag
+        if self.color:
+            prefix = f"\033[{self.tag_colors[index]}m{tag}{self.RESET}"
+        self.write(is_stderr, prefix.encode() + self.separator.encode() + line)
 
-    def run_one(self, tag: str, command: str) -> tuple[int, list[tuple[bool, bytes]]]:
+    def run_one(self, index: int, tag: str, command: str) -> tuple[int, list[tuple[bool, bytes]]]:
         saved: list[tuple[bool, bytes]] = []
 
         def pump(pipe, is_stderr: bool) -> None:
             for line in iter(pipe.readline, b""):
-                self.write_prefixed(tag, is_stderr, line)
+                self.write_prefixed(index, tag, is_stderr, line)
                 if self.errors:
                     saved.append((is_stderr, line if line.endswith(b"\n") else line + b"\n"))
             pipe.close()
@@ -1344,7 +1372,7 @@ class ParallelCommand(MainSubCommand):
             process = subprocess.Popen(command, shell=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         except OSError as e:
             message = f"failed to start command: {e}\n".encode()
-            self.write_prefixed(tag, True, message)
+            self.write_prefixed(index, tag, True, message)
             return 127, [(True, message)]
 
         with self.processes_lock:

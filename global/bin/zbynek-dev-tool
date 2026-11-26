@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import errno
 import fnmatch
 import logging
@@ -1203,8 +1204,14 @@ class ParallelCommand(MainSubCommand):
     command is repeated (in input order), followed by its failure line again, so failures are not
     lost in the output of a long run.
 
-    With --color, only the tag prefix of every output line is colored, using a color specific to
-    the command (distinguishable colors, never green, white, blue or red).
+    With -t, every output line is prefixed with the local time (HH:mm:ss.SSS), with --dt with the full
+    local date and time (yyyy-MM-ddTHH:mm:ss.SSS); --tu switches either of them to UTC (implying -t
+    if neither is given; UTC date and time gets a Z suffix). The timestamp is the first item of the
+    line, followed by a space and the tag. The status lines (succeeded / failed) get the timestamp of the
+    command's end, inside their color. Lines repeated by --errors keep their original timestamps.
+
+    With --color, only the prefix (timestamp, if any, and tag) of every output line is colored, using
+    a color specific to the command (distinguishable colors, never green, white, blue or red).
 
     Exits with the highest exit code of the commands (a command killed by a signal counts as
     128+signal, a command which could not be started as 127), or at least 1 if any input line
@@ -1216,6 +1223,9 @@ class ParallelCommand(MainSubCommand):
     errors: bool = False
     color: bool = False
     separator: str = " "
+    time: bool = False
+    datetime: bool = False
+    utc: bool = False
 
     # Tag colors (SGR parameters) chosen to be well visible on dark and light backgrounds; green,
     # white (default text colors), blue (success) and red (failure) are deliberately absent.
@@ -1243,12 +1253,17 @@ class ParallelCommand(MainSubCommand):
         parser.add_argument("-n", "--jobs", type=int, default=0, help="maximum number of commands running in parallel, 0 means number of CPUs (default 0)")
         parser.add_argument("-s", "--separator", default=" ", help="separator printed between the tag and the output line (default a single space)")
         parser.add_argument("-c", "--color", action="store_true", help="color the tag of each output line, each command with its own color")
+        parser.add_argument("-t", "--time", action="store_true", help="prefix each output line with the local time (HH:mm:ss.SSS)")
+        parser.add_argument("--td", "--datetime", dest="datetime", action="store_true", help="prefix each output line with the full local date and time (yyyy-MM-ddTHH:mm:ss.SSS)")
+        parser.add_argument("--tu", "--utc", dest="utc", action="store_true", help="print the timestamps in UTC instead of local time (implies -t unless --dt is given)")
         parser.add_argument("-e", "--errors", action="store_true", help="after all commands finished, report the failed commands again, with their output")
 
         parser.parse_args(args[1:], namespace=self)
 
         if self.jobs < 0:
             parser.error("--jobs must not be negative")
+        if self.utc and not self.datetime:
+            self.time = True
         if self.jobs == 0:
             self.jobs = os.cpu_count() or 1
         if not self.inputs:
@@ -1285,7 +1300,8 @@ class ParallelCommand(MainSubCommand):
             return 1
 
         self.tag_colors = {index: self.TAG_COLORS[index % len(self.TAG_COLORS)] for index in range(len(commands))}
-        results: list[tuple[int, list[tuple[bool, bytes]]] | None] = [None] * len(commands)
+        results: list[tuple[int, list[tuple[bool, bytes, float]]] | None] = [None] * len(commands)
+        finished: dict[int, float] = {}
         pending: queue.Queue = queue.Queue()
         for index, (tag, command) in enumerate(commands):
             pending.put(index)
@@ -1298,10 +1314,11 @@ class ParallelCommand(MainSubCommand):
                     return
                 tag, command = commands[index]
                 results[index] = self.run_one(index, tag, command)
+                finished[index] = time.time()
                 if results[index][0] != 0:
-                    self.report_failure(tag, command, results[index][0])
+                    self.report_failure(tag, command, results[index][0], finished[index])
                 else:
-                    self.report_success(tag, command)
+                    self.report_success(tag, command, finished[index])
 
         threads = [threading.Thread(target=worker, daemon=True) for _ in range(min(self.jobs, len(commands)))]
         for thread in threads:
@@ -1332,17 +1349,20 @@ class ParallelCommand(MainSubCommand):
             for index, ((tag, command), result) in enumerate(zip(commands, results)):
                 if result is None or result[0] == 0:
                     continue
-                for is_stderr, line in result[1]:
-                    self.write_prefixed(index, tag, is_stderr, line)
-                self.report_failure(tag, command, result[0])
+                for is_stderr, line, timestamp in result[1]:
+                    self.write_prefixed(index, tag, is_stderr, line, timestamp)
+                self.report_failure(tag, command, result[0], finished[index])
 
         return exit_code
 
-    def report_failure(self, tag: str, command: str, code: int) -> None:
-        self.write(True, f"\033[{self.FAILURE_COLOR}m=== {tag} failed with exit code {code}: {command}{self.RESET}\n".encode())
+    def status_prefix(self, timestamp: float) -> str:
+        return self.format_timestamp(timestamp) + " " if self.time or self.datetime else ""
 
-    def report_success(self, tag: str, command: str) -> None:
-        self.write(True, f"\033[{self.SUCCESS_COLOR}m=== {tag} succeeded: {command}{self.RESET}\n".encode())
+    def report_failure(self, tag: str, command: str, code: int, timestamp: float) -> None:
+        self.write(True, f"\033[{self.FAILURE_COLOR}m{self.status_prefix(timestamp)}=== {tag} failed with exit code {code}: {command}{self.RESET}\n".encode())
+
+    def report_success(self, tag: str, command: str, timestamp: float) -> None:
+        self.write(True, f"\033[{self.SUCCESS_COLOR}m{self.status_prefix(timestamp)}=== {tag} succeeded: {command}{self.RESET}\n".encode())
 
     def write(self, is_stderr: bool, data: bytes) -> None:
         stream = sys.stderr.buffer if is_stderr else sys.stdout.buffer
@@ -1350,30 +1370,41 @@ class ParallelCommand(MainSubCommand):
             stream.write(data)
             stream.flush()
 
-    def write_prefixed(self, index: int, tag: str, is_stderr: bool, line: bytes) -> None:
+    def format_timestamp(self, timestamp: float) -> str:
+        moment = datetime.datetime.fromtimestamp(timestamp, datetime.timezone.utc if self.utc else None)
+        millis = f"{moment.microsecond // 1000:03d}"
+        if self.datetime:
+            return moment.strftime("%Y-%m-%dT%H:%M:%S") + "." + millis + ("Z" if self.utc else "")
+        return moment.strftime("%H:%M:%S") + "." + millis
+
+    def write_prefixed(self, index: int, tag: str, is_stderr: bool, line: bytes, timestamp: float | None = None) -> None:
         if not line.endswith(b"\n"):
             line += b"\n"
         prefix = tag
+        if self.time or self.datetime:
+            prefix = self.format_timestamp(time.time() if timestamp is None else timestamp) + " " + tag
         if self.color:
-            prefix = f"\033[{self.tag_colors[index]}m{tag}{self.RESET}"
+            prefix = f"\033[{self.tag_colors[index]}m{prefix}{self.RESET}"
         self.write(is_stderr, prefix.encode() + self.separator.encode() + line)
 
-    def run_one(self, index: int, tag: str, command: str) -> tuple[int, list[tuple[bool, bytes]]]:
-        saved: list[tuple[bool, bytes]] = []
+    def run_one(self, index: int, tag: str, command: str) -> tuple[int, list[tuple[bool, bytes, float]]]:
+        saved: list[tuple[bool, bytes, float]] = []
 
         def pump(pipe, is_stderr: bool) -> None:
             for line in iter(pipe.readline, b""):
-                self.write_prefixed(index, tag, is_stderr, line)
+                timestamp = time.time()
+                self.write_prefixed(index, tag, is_stderr, line, timestamp)
                 if self.errors:
-                    saved.append((is_stderr, line if line.endswith(b"\n") else line + b"\n"))
+                    saved.append((is_stderr, line if line.endswith(b"\n") else line + b"\n", timestamp))
             pipe.close()
 
         try:
             process = subprocess.Popen(command, shell=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         except OSError as e:
             message = f"failed to start command: {e}\n".encode()
-            self.write_prefixed(index, tag, True, message)
-            return 127, [(True, message)]
+            timestamp = time.time()
+            self.write_prefixed(index, tag, True, message, timestamp)
+            return 127, [(True, message, timestamp)]
 
         with self.processes_lock:
             self.processes.add(process)

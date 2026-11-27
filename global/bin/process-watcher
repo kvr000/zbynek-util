@@ -1,0 +1,625 @@
+#!/usr/bin/env python3
+
+# Runs processes described in a JSON file, restarting them when they exit.
+# Python port of zbynek-java-exp/process-exp/process-watcher.
+#
+# Author: Zbynek Vyskovsky, https://github.com/kvr000/zbynek-util/
+
+import argparse
+import heapq
+import itertools
+import logging
+import os
+import platform
+import queue
+import re
+import signal
+import subprocess
+import sys
+import threading
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Optional
+
+try:
+    import json5
+except ImportError:
+    sys.exit("process-watcher: missing dependency json5, install it with: pip install json5")
+
+
+DOC = """\
+Process watcher
+
+Utility to run processes and to control their lifecycle, automatically restarting when exited.
+
+Process tree is described in a single JSON file (JSON5: comments, single quotes, unquoted keys and
+trailing commas are allowed), with top-level `processes` (and optional `properties`) and the
+following attributes of each process:
+
+- command:         command to run, as list
+- shellCommand:    command to run via shell (sh -c / cmd /c), alternative to `command`
+- startTimeMs:     time the process needs to initialize, so processing the tree can continue (default 4000)
+- restartDelayMs:  minimal interval from last start to attempt to restart the process (default 10000)
+- terminateTimeMs: time between SIGTERM and SIGKILL (default 10000)
+- disabled:        true to disable the process
+- disableProperty: name of property (from --properties file), disabling the process when `true`
+- disableOs:       list of OS names (Linux, Mac OS X, Windows 10...) the process is disabled on
+- disableFile:     file whose existence disables the process
+- dependencies:    list of processes that must be up before this process is started
+
+Signals: TERM and INT terminate all processes and exit, HUP reloads the specification.
+
+Example:
+
+{
+    processes: {
+        first:  { command: [ "sleep", 20 ], startTimeMs: 1000 },
+        second: { command: [ "sleep", 8 ], startTimeMs: 2000, restartDelayMs: 10000 },
+        third:  { command: [ "sleep", 30 ], dependencies: [ "first", "second" ] },
+        filedisabled: { command: [ "sleep", 300 ], disableFile: "target/disabled" },
+    }
+}
+"""
+
+log = logging.getLogger("process-watcher")
+
+AUTO_RELOAD_ATTEMPTS = 5
+RELOAD_RETRY_DELAY_S = 0.5
+AUTO_RELOAD_DEBOUNCE_S = 0.3
+
+
+# ---------------------------------------------------------------------------
+# Specification parsing
+# ---------------------------------------------------------------------------
+
+def load_properties(path: str) -> dict[str, str]:
+    """Reads Java .properties file."""
+    with open(path, encoding="utf-8") as f:
+        raw_lines = f.read().splitlines()
+
+    def unescape(s: str) -> str:
+        out = []
+        k = 0
+        while k < len(s):
+            ch = s[k]
+            if ch == "\\" and k + 1 < len(s):
+                k += 1
+                ch = s[k]
+                if ch == "u" and k + 4 < len(s) + 0 and re.fullmatch(r"[0-9a-fA-F]{4}", s[k + 1:k + 5] or ""):
+                    out.append(chr(int(s[k + 1:k + 5], 16)))
+                    k += 4
+                else:
+                    out.append({"t": "\t", "n": "\n", "r": "\r", "f": "\f"}.get(ch, ch))
+            else:
+                out.append(ch)
+            k += 1
+        return "".join(out)
+
+    result: dict[str, str] = {}
+    it = iter(raw_lines)
+    for line in it:
+        line = line.lstrip(" \t\f")
+        if not line or line[0] in "#!":
+            continue
+        while (len(line) - len(line.rstrip("\\"))) % 2 == 1:
+            nxt = next(it, "")
+            line = line[:-1] + nxt.lstrip(" \t\f")
+        k = 0
+        while k < len(line) and line[k] not in "=: \t\f":
+            k += 2 if line[k] == "\\" else 1
+        key = line[:k]
+        rest = line[k:].lstrip(" \t\f")
+        if rest[:1] in ("=", ":"):
+            rest = rest[1:].lstrip(" \t\f")
+        result[unescape(key)] = unescape(rest)
+    return result
+
+
+@dataclass(frozen=True)
+class ProcessSpec:
+    command: Optional[tuple[str, ...]] = None
+    shell_command: Optional[str] = None
+    start_time_ms: int = 4_000
+    restart_delay_ms: int = 10_000
+    terminate_time_ms: int = 10_000
+    disabled: bool = False
+    disable_property: Optional[str] = None
+    disable_os: Optional[tuple[str, ...]] = None
+    disable_file: Optional[str] = None
+    dependencies: tuple[str, ...] = ()
+
+    _FIELDS = {
+        "command": "command", "shellCommand": "shell_command", "startTimeMs": "start_time_ms",
+        "restartDelayMs": "restart_delay_ms", "terminateTimeMs": "terminate_time_ms",
+        "disabled": "disabled", "disableProperty": "disable_property", "disableOs": "disable_os",
+        "disableFile": "disable_file", "dependencies": "dependencies",
+    }
+
+    @staticmethod
+    def from_json(name: str, data: Any) -> "ProcessSpec":
+        if not isinstance(data, dict):
+            raise ValueError(f"Process {name} must be an object")
+        kwargs: dict[str, Any] = {}
+        for key, value in data.items():
+            if key not in ProcessSpec._FIELDS:
+                raise ValueError(f"Process {name}: unknown attribute {key}")
+            attr = ProcessSpec._FIELDS[key]
+            if attr in ("command", "disable_os", "dependencies"):
+                if value is None:
+                    continue
+                if not isinstance(value, list):
+                    raise ValueError(f"Process {name}: {key} must be a list")
+                value = tuple(str(v) for v in value)
+            elif attr in ("start_time_ms", "restart_delay_ms", "terminate_time_ms"):
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise ValueError(f"Process {name}: {key} must be a number")
+                value = int(value)
+            elif attr == "disabled":
+                value = bool(value)
+            elif value is not None:
+                value = str(value)
+            kwargs[attr] = value
+        spec = ProcessSpec(**kwargs)
+        if (spec.command is None) == (spec.shell_command is None):
+            raise ValueError(f"Process {name}: only one of command and shellCommand may be specified")
+        if spec.start_time_ms < 0:
+            raise ValueError(f"Process {name}: startTimeMs must be non-negative")
+        if spec.restart_delay_ms < 0:
+            raise ValueError(f"Process {name}: restartDelayMs must be non-negative")
+        if spec.terminate_time_ms < 0:
+            raise ValueError(f"Process {name}: terminateTimeMs must be non-negative")
+        return spec
+
+
+@dataclass(frozen=True)
+class Specification:
+    processes: dict[str, ProcessSpec]
+    properties: dict[str, str]
+
+
+def read_specification(spec_path: str, properties_path: Optional[str]) -> Specification:
+    with open(spec_path, encoding="utf-8") as f:
+        data = json5.load(f)
+    if not isinstance(data, dict):
+        raise ValueError("Specification must be an object")
+    for key in data:
+        if key not in ("processes", "properties"):
+            raise ValueError(f"Unknown top-level attribute {key}")
+    processes = {
+        name: ProcessSpec.from_json(name, value)
+        for name, value in (data.get("processes") or {}).items()
+    }
+    properties = {k: str(v) for k, v in (data.get("properties") or {}).items()}
+    if properties_path is not None:
+        properties = load_properties(properties_path)
+    return Specification(processes, properties)
+
+
+# ---------------------------------------------------------------------------
+# Process control
+# ---------------------------------------------------------------------------
+
+class TaskHandle:
+    """Running process, allows controlling it."""
+
+    def __init__(self, command: list[str]):
+        self.exit_code: Optional[int] = None
+        self.error: Optional[BaseException] = None
+        self.finished = False
+        self.process: Optional[subprocess.Popen] = None
+        try:
+            # stdout and stderr are inherited
+            self.process = subprocess.Popen(command)
+        except BaseException as ex:  # noqa
+            self.error = ex
+            self.finished = True
+
+    @staticmethod
+    def shell(command: str) -> "TaskHandle":
+        if platform.system() == "Windows":
+            return TaskHandle(["cmd", "/c", command])
+        return TaskHandle(["sh", "-c", command])
+
+    def watch_exit(self, on_exit: Callable[[], None]) -> None:
+        """Calls on_exit (from a helper thread) once the process finished or failed to start."""
+        if self.process is None:
+            on_exit()
+            return
+
+        def wait() -> None:
+            self.exit_code = self.process.wait()
+            self.finished = True
+            on_exit()
+
+        threading.Thread(target=wait, name="wait-exit", daemon=True).start()
+
+    def terminate(self) -> None:
+        if self.process is not None and self.process.poll() is None:
+            self.process.terminate()
+
+    def kill(self) -> None:
+        if self.process is not None and self.process.poll() is None:
+            self.process.kill()
+
+
+STOPPED = "STOPPED"
+STARTING = "STARTING"
+RUNNING = "RUNNING"
+DISABLED = "DISABLED"
+TERMINATING = "TERMINATING"
+RESTART = "RESTART"
+REMOVE = "REMOVE"
+
+
+@dataclass
+class ProcessState:
+    id: str
+    process: ProcessSpec
+    desired: str = RUNNING
+    status: str = STOPPED
+    handle: Optional[TaskHandle] = None
+    last_start: Optional[float] = None
+
+    def is_up(self) -> bool:
+        return self.status in (RUNNING, DISABLED)
+
+    def is_down(self) -> bool:
+        return self.status in (STOPPED, DISABLED)
+
+    def is_desired_inactive(self) -> bool:
+        return self.desired in (REMOVE, DISABLED)
+
+
+def os_names() -> set[str]:
+    system = platform.system()
+    names = {system}
+    if system == "Darwin":
+        names.add("Mac OS X")
+    elif system == "Windows":
+        names.add("Windows " + platform.release())
+    return names
+
+
+class Watcher:
+    """
+    Runs the process tree and keeps it in the desired state.
+
+    Event driven: the loop in run() sleeps until an event is posted (process exit, signal, file change) or
+    the next timer is due. All state is touched only from that loop; other threads and signal handlers
+    only call post().
+    """
+
+    def __init__(self, specification: Specification):
+        self.properties = specification.properties
+        self.processes: dict[str, ProcessState] = {}
+        self.timers: list[tuple[float, int, Callable[[], None]]] = []
+        self.counter = itertools.count()
+        self.need_review = True
+        self.cancelling = False
+        self.events: queue.SimpleQueue = queue.SimpleQueue()
+        self.reload_pending = False
+        self.apply_specification(specification, initial=True)
+
+    # -- scheduling ---------------------------------------------------------
+
+    def schedule(self, delay_s: float, fn: Callable[[], None]) -> None:
+        heapq.heappush(self.timers, (time.monotonic() + delay_s, next(self.counter), fn))
+
+    def post(self, event: Callable[[], None]) -> None:
+        """Queues the event to run in the main loop, safe to call from any thread and from signal handlers."""
+        self.events.put(event)
+
+    def request_review(self) -> None:
+        self.need_review = True
+
+    def cancel(self) -> None:
+        if self.cancelling:
+            return
+        self.cancelling = True
+        for state in self.processes.values():
+            if not state.is_desired_inactive():
+                state.desired = STOPPED
+        self.request_review()
+
+    def is_finished(self) -> bool:
+        return self.cancelling and all(s.is_down() for s in self.processes.values())
+
+    # -- main loop ----------------------------------------------------------
+
+    def run(self) -> None:
+        while True:
+            self.handle_review()
+            if self.is_finished():
+                return
+            timeout = max(0.0, self.timers[0][0] - time.monotonic()) if self.timers else None
+            try:
+                self.events.get(timeout=timeout)()
+            except queue.Empty:
+                pass
+            now = time.monotonic()
+            while self.timers and self.timers[0][0] <= now:
+                heapq.heappop(self.timers)[2]()
+
+    # -- steps --------------------------------------------------------------
+
+    def run_process(self, state: ProcessState) -> None:
+        spec = state.process
+        handle = TaskHandle(list(spec.command)) if spec.command is not None else TaskHandle.shell(spec.shell_command)
+        state.handle = handle
+        state.status = STARTING
+        state.last_start = time.monotonic()
+        if handle.error is None:
+            log.info("Process started: process=%s pid=%s", state.id, handle.process.pid)
+        handle.watch_exit(lambda: self.post(lambda: self.handle_exited(state, handle)))
+        self.schedule(spec.start_time_ms / 1000, lambda: self.handle_running(state, handle))
+
+    def terminate_process(self, state: ProcessState) -> None:
+        handle = state.handle
+        state.status = TERMINATING
+        handle.terminate()
+
+        def kill_if_still_running() -> None:
+            if state.handle is handle and not handle.finished:
+                log.warning("Process did not terminate, killing: process=%s", state.id)
+                handle.kill()
+
+        self.schedule(state.process.terminate_time_ms / 1000, kill_if_still_running)
+
+    def handle_running(self, state: ProcessState, handle: TaskHandle) -> None:
+        if state.handle is handle and state.status == STARTING:
+            log.info("Process running: process=%s", state.id)
+            state.status = RUNNING
+            self.request_review()
+
+    def handle_exited(self, state: ProcessState, handle: TaskHandle) -> None:
+        if state.handle is not handle:
+            return
+        if handle.error is not None:
+            log.error("Process failed to start: process=%s error=%s", state.id, handle.error)
+        else:
+            log.error("Process exited: process=%s exit=%s", state.id, handle.exit_code)
+        state.status = STOPPED
+        state.handle = None
+        if state.desired == REMOVE:
+            self.processes.pop(state.id, None)
+        elif state.desired == RESTART:
+            state.desired = RUNNING
+        self.request_review()
+
+    def handle_review(self) -> None:
+        if not self.need_review:
+            return
+        self.need_review = False
+
+        for state in list(self.processes.values()):
+            if state.desired == RUNNING:
+                if self.cancelling or state.handle is not None:
+                    continue
+                if not all(
+                    self.processes[dep].is_up() if dep in self.processes else True
+                    for dep in state.process.dependencies
+                ):
+                    continue
+                if state.last_start is not None:
+                    delay = state.last_start + state.process.restart_delay_ms / 1000 - time.monotonic()
+                    if delay > 0:
+                        self.schedule(delay, self.request_review)
+                        continue
+                self.run_process(state)
+            elif state.desired in (DISABLED, STOPPED, REMOVE, RESTART):
+                if state.handle is None:
+                    if state.desired == DISABLED:
+                        state.status = DISABLED
+                    elif state.desired == REMOVE:
+                        self.processes.pop(state.id, None)
+                elif state.status != TERMINATING:
+                    self.terminate_process(state)
+
+        if self.reload_pending and not self.cancelling and all(s.is_up() for s in self.processes.values()):
+            self.reload_pending = False
+            log.info("Reload completed")
+
+    def handle_reload(self, specification: Specification) -> None:
+        if self.cancelling:
+            log.warning("Reload ignored, terminate in progress")
+            return
+        self.properties = specification.properties
+        for state in list(self.processes.values()):
+            process = specification.processes.get(state.id)
+            if process is None:
+                state.desired = REMOVE
+            elif process != state.process:
+                state.process = process
+                if self.is_disabled(process):
+                    state.desired = DISABLED
+                else:
+                    state.desired = RUNNING if state.handle is None else RESTART
+            else:
+                state.desired = DISABLED if self.is_disabled(process) else RUNNING
+        for name, process in specification.processes.items():
+            if name not in self.processes:
+                self.processes[name] = self.new_state(name, process)
+        self.reload_pending = True
+        self.request_review()
+
+    # -- state helpers ------------------------------------------------------
+
+    def apply_specification(self, specification: Specification, initial: bool) -> None:
+        self.properties = specification.properties
+        for name, process in specification.processes.items():
+            self.processes[name] = self.new_state(name, process)
+
+    def new_state(self, name: str, process: ProcessSpec) -> ProcessState:
+        state = ProcessState(id=name, process=process)
+        if self.is_disabled(process):
+            state.desired = DISABLED
+        return state
+
+    def is_disabled(self, process: ProcessSpec) -> bool:
+        if process.disabled:
+            return True
+        if process.disable_property is not None and self.properties.get(process.disable_property, "").lower() == "true":
+            return True
+        if process.disable_file is not None and os.path.exists(process.disable_file):
+            return True
+        if process.disable_os is not None and any(name in process.disable_os for name in os_names()):
+            return True
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Command line
+# ---------------------------------------------------------------------------
+
+class Main:
+    def __init__(self):
+        self.spec: str = ""
+        self.properties: Optional[str] = None
+        self.pid_file: Optional[str] = None
+        self.auto_reload = False
+        self.watcher: Optional[Watcher] = None
+        self.signals: list[int] = []
+
+    def run(self, args: list[str]) -> int:
+        exit_code = self.setup(args)
+        if exit_code is not None:
+            return exit_code
+        return self.execute()
+
+    def setup(self, args: list[str]) -> Optional[int]:
+        parser = argparse.ArgumentParser(
+            prog="process-watcher",
+            description="ProcessRunner - runs and controls processes",
+        )
+        parser.add_argument("-s", "--spec", help="definition file of processes")
+        parser.add_argument("-p", "--properties", help="definition file of tasks")
+        parser.add_argument("--auto-reload", action="store_true",
+                            help="reload automatically when the spec or properties file changes")
+        parser.add_argument("--pid-file", help="file to write the process-watcher PID to at start, removed on exit")
+        parser.add_argument("--doc", action="store_true", help="prints concise documentation")
+        try:
+            ns = parser.parse_args(args)
+        except SystemExit as ex:
+            # argparse exits with 2 on invalid usage; 0 (help) is kept
+            return 122 if ex.code == 2 else ex.code
+
+        if ns.doc:
+            sys.stdout.write(DOC)
+            return 0
+        if ns.spec is None:
+            parser.print_usage(sys.stderr)
+            print("process-watcher: error: --spec must be specified", file=sys.stderr)
+            return 122
+        self.spec = ns.spec
+        self.properties = ns.properties
+        self.pid_file = ns.pid_file
+        self.auto_reload = ns.auto_reload
+        return None
+
+    def execute(self) -> int:
+        formatter = logging.Formatter("%(asctime)s %(levelname)-5s %(name)s - %(message)s")
+        formatter.default_time_format = "%Y-%m-%dT%H:%M:%S"
+        formatter.default_msec_format = "%s.%03d"
+        handler = logging.StreamHandler()
+        handler.setFormatter(formatter)
+        logging.basicConfig(level=logging.INFO, handlers=[handler])
+        try:
+            specification = read_specification(self.spec, self.properties)
+        except Exception as ex:  # noqa
+            log.error("Failed to read specification: %s", ex)
+            return 1
+
+        pid_path = Path(self.pid_file) if self.pid_file is not None else None
+        if pid_path is not None:
+            pid_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
+        try:
+            return self.execute_watcher(specification)
+        finally:
+            if pid_path is not None:
+                try:
+                    pid_path.unlink(missing_ok=True)
+                except OSError as ex:
+                    log.warning("Failed to delete PID file %s: %s", pid_path, ex)
+
+    def install_signals(self) -> None:
+        for name in ("SIGTERM", "SIGINT", "SIGHUP"):
+            sig = getattr(signal, name, None)
+            if sig is None:
+                log.warning("%s signal handler not installed: not supported on this platform", name)
+                continue
+            # handlers only post an event, the work is done in the main loop
+            signal.signal(sig, lambda signum, frame: self.watcher.post(lambda: self.handle_signal(signum)))
+
+    def handle_signal(self, signum: int) -> None:
+        if signum == getattr(signal, "SIGHUP", None):
+            log.info("Got HUP signal")
+            self.reload_specification(1, 1)
+        else:
+            log.info("Got %s signal", signal.Signals(signum).name[3:])
+            self.watcher.cancel()
+
+    def start_file_observer(self):
+        """Watches the directories of the configuration files using native file events (inotify etc.)."""
+        try:
+            from watchdog.events import FileSystemEventHandler
+            from watchdog.observers import Observer
+        except ImportError:
+            sys.exit("process-watcher: --auto-reload needs watchdog, install it with: pip install watchdog")
+
+        files = {os.path.abspath(f) for f in (self.spec, self.properties) if f}
+        generation = itertools.count(1)
+        latest = [0]
+
+        def changed(gen: int) -> None:
+            # debounce: wait for editors writing the file in several steps
+            latest[0] = gen
+            self.watcher.schedule(AUTO_RELOAD_DEBOUNCE_S, lambda: settled(gen))
+
+        def settled(gen: int) -> None:
+            if gen == latest[0]:
+                log.info("Configuration file changed, reloading")
+                self.reload_specification(1, AUTO_RELOAD_ATTEMPTS)
+
+        class Handler(FileSystemEventHandler):
+            def on_any_event(self, event) -> None:
+                paths = {os.path.abspath(os.fsdecode(p)) for p in (event.src_path, getattr(event, "dest_path", None)) if p}
+                if event.event_type != "opened" and event.event_type != "closed_no_write" and paths & files:
+                    gen = next(generation)
+                    main.watcher.post(lambda: changed(gen))
+
+        main = self
+        observer = Observer()
+        for directory in {os.path.dirname(f) for f in files}:
+            observer.schedule(Handler(), directory, recursive=False)
+        observer.daemon = True
+        observer.start()
+        return observer
+
+    def execute_watcher(self, specification: Specification) -> int:
+        self.watcher = Watcher(specification)
+        self.install_signals()
+        observer = self.start_file_observer() if self.auto_reload else None
+        try:
+            self.watcher.run()
+        finally:
+            if observer is not None:
+                observer.stop()
+        return 0
+
+    def reload_specification(self, attempt: int, attempts: int) -> None:
+        """Reads the specification and passes it to the watcher, retrying later (without blocking) on failure."""
+        try:
+            specification = read_specification(self.spec, self.properties)
+        except Exception as ex:  # noqa
+            if attempt >= attempts:
+                log.warning("Failed to read specification, keeping the current one: %s", ex)
+            else:
+                log.info("Failed to read specification, retrying: attempt=%d/%d error=%s", attempt, attempts, ex)
+                self.watcher.schedule(RELOAD_RETRY_DELAY_S, lambda: self.reload_specification(attempt + 1, attempts))
+            return
+        self.watcher.handle_reload(specification)
+
+
+if __name__ == "__main__":
+    sys.exit(Main().run(sys.argv[1:]))

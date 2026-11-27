@@ -37,6 +37,7 @@ sudo apt -y install texlive-extra-utils pdftk-java qpdf pdfgrep
 
 # Python general:
 sudo apt -y install python3 python3-pydantic
+sudo apt -y install python3-watchdog python3-json5
 
 # Perl general:
 sudo apt -y install perl perl-doc libversion-perl libscalar-list-utils-perl libio-string-perl libtie-ixhash-perl libfile-slurp-perl libxml-perl libxml-libxml-perl libjson-pp-perl libjson-xs-perl libtext-trim-perl libmime-base64-urlsafe-perl libcompress-raw-zlib-perl libextutils-makemaker-cpanfile-perl libmodule-build-perl libtest-simple-perl libtest-harness-perl #libdigest-sha3-perl

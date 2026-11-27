@@ -3,7 +3,7 @@
 set -e
 
 sudo yum -y install coreutils gnupg2 jq libfaketime parallel telnet lynx btop htop
-sudo apt -y install strace
+sudo yum -y install strace
 sudo yum -y install gcc gcc-c++
 sudo yum -y install clang
 sudo yum -y install mc lynx curl
@@ -26,10 +26,12 @@ sudo yum -y install make cmake
 sudo yum -y install ImageMagick
 
 # pdf manipulation
-sudo apt -y install texlive-extra-utils pdftk-java qpdf pdfgrep
+sudo yum -y install texlive-extra-utils pdftk-java qpdf pdfgrep
 
 # Python general:
-sudo apt -y install python3 pydantic
+sudo yum -y install python3 pydantic
+sudo yum -y install python3-watchdog
+sudo yum -y install python3-json5 || true
 
 # Perl general:
 sudo yum -y install cpan perl-version perl-File-Slurp perl-Scalar-List-Utils perl-IO-String perl-Tie-IxHash perl-IO-Compress-Zlib perl-IO-Zlib perl-libxml-perl perl-XML-LibXML perl-MIME-Base64-URLSafe perl-JSON-PP perl-JSON-XS perl-Text-Trim perl-Digest-SHA3 perl-ExtUtils-MakeMaker perl-Module-Build perl-Test-Simple perl-Test-Harness
